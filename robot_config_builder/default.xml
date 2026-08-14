@@ -1,0 +1,69 @@
+<event type="Sequence">
+	<meter-list state="Game-Complete" on-leave="True">
+		<output address="172.25.18.190:2207"/>
+		<meter>Free-Memory</meter>
+		<meter>Video-Used-Memory</meter>
+	</meter-list>
+	<!-- on enter game idle record all meters -->
+	<meter-list state="Game-Idle">
+		<output filename="robotlogs/meters.csv" append="True"/>
+		<meter>Used-Memory</meter>
+		<meter>Free-Memory</meter>
+		<meter>Total-Memory</meter>
+		<meter>Video-Used-Memory</meter>
+		<meter>Video-Free-Memory</meter>
+		<meter>Video-Total-Memory</meter>
+		<meter>Games-Played</meter>
+		<meter>Turnover</meter>
+		<meter>Total-Win</meter>
+		<meter>Credit</meter>
+	</meter-list>
+	<meter-list timeout="4" units="Seconds">
+		<output filename="robotlogs/meters4sec.csv" append="False"/>
+		<meter>Games-Played</meter>
+		<meter>Turnover</meter>
+		<meter>Total-Win</meter>
+	</meter-list>
+	<!-- this will only start a feature -->
+	<event type="Button" id="Gonna start a feature, yippee!" key="Play">
+		<state-list type="White">
+			<state>Feature</state>
+		</state-list>
+	</event>
+	<!-- for random pick event -->
+	<event type="Random">
+		<event type="Button" weight="65" key="Play"/>
+		<event type="Button" weight="20" key="Bet-5"/>
+		<event type="Touch-Screen" weight="10">
+			<point x="161" y="1066"/>
+		</event>
+		<!-- door + switch sequence -->
+		<event type="Sequence" weight="5">
+			<event type="Door" door="Logic" open="True"/>
+			<event type="Wait" timeout="500"/>
+			<event type="Door" door="Logic" open="False"/>
+			<event type="Wait" timeout="500"/>
+			<event type="Switch" switch="2"/>
+			<event type="Wait" timeout="500"/>
+			<event type="Switch" switch="2" off="True"/>
+			<event type="Wait" timeout="500"/>
+		</event>
+	</event>
+	<event type="Touch-Area">
+		<point x="1" y="1"/>
+		<point x="161" y="1066"/>
+		<state-list type="Black">
+			<state>Game-Idle</state>
+		</state-list>
+	</event>
+	<event type="Wait" timeout="500"/>
+	<event type="Wait" id="Wait for idle" state="Game-Idle" timeout="1" units="Seconds"/>
+	<event type="Insert-Credit" value="2048" when-below="512"/>
+	<event type="Wait" timeout="500"/>
+	<output filename="robotlogs/eventsfile.txt" append="False"/>
+	<state-list type="White">
+		<state>Game-Idle</state>
+		<state>Feature</state>
+		<state>Game-Play</state>
+	</state-list>
+</event>

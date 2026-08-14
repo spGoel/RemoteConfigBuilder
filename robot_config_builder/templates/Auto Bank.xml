@@ -1,0 +1,92 @@
+<event type="Sequence">
+	<meter-list timeout="15" units="Seconds">
+		<output filename="robotlogs/eventsfile.txt" append="False"/>
+		<meter>Video-Used-Memory</meter>
+		<meter>Video-Free-Memory</meter>
+		<meter>Video-Total-Memory</meter>
+		<meter>Used-Memory</meter>
+		<meter>Free-Memory</meter>
+		<meter>Total-Memory</meter>
+		<meter>File-Buffer-Cache</meter>
+		<meter>Page-Cache</meter>
+		<meter>Real-Free-Memory</meter>
+		<meter>CMR</meter>
+		<meter>Max-CMR</meter>
+		<meter>Sys-CPU</meter>
+		<meter>User-CPU</meter>
+		<meter>Idle-CPU</meter>
+		<meter>Games-Played</meter>
+		<meter>Turnover</meter>
+		<meter>Total-Win</meter>
+		<meter>Credit</meter>
+		<meter>Bet</meter>
+		<meter>Last-Win</meter>
+		<meter>Hopper-Pay</meter>
+		<meter>Jackpot</meter>
+	</meter-list>
+	<!-- Grandstar — auto bank + 4x Play (credit embedded) -->
+	<event type="Sequence">
+		<!-- auto bank setup -->
+		<event type="Sequence">
+			<!-- bank button (closed state) -->
+			<event type="Touch-Screen">
+				<point x="500" y="1045"/>
+			</event>
+			<!-- bank button (open state) -->
+			<event type="Touch-Screen">
+				<point x="800" y="1045"/>
+			</event>
+			<!-- Auto button -->
+			<event type="Touch-Screen">
+				<point x="600" y="680"/>
+			</event>
+			<!-- choose bank amount -->
+			<event type="Random">
+				<!-- tap denom amount area -->
+				<event type="Touch-Area" weight="60">
+					<point x="490" y="530"/>
+					<point x="1435" y="590"/>
+				</event>
+				<!-- All -->
+				<event type="Touch-Screen" weight="10">
+					<point x="600" y="700"/>
+				</event>
+				<!-- enter custom amount -->
+				<event type="Sequence" weight="30">
+					<!-- Other amount button -->
+					<event type="Touch-Screen">
+						<point x="960" y="700"/>
+					</event>
+					<!-- numpad entry area -->
+					<event type="Touch-Area">
+						<point x="535" y="330"/>
+						<point x="1360" y="620"/>
+					</event>
+					<event type="Touch-Area">
+						<point x="535" y="330"/>
+						<point x="1360" y="620"/>
+					</event>
+					<event type="Touch-Area">
+						<point x="535" y="330"/>
+						<point x="1360" y="620"/>
+					</event>
+					<event type="Touch-Area">
+						<point x="535" y="330"/>
+						<point x="1360" y="620"/>
+					</event>
+					<!-- Set limit -->
+					<event type="Touch-Screen">
+						<point x="780" y="700"/>
+					</event>
+				</event>
+			</event>
+		</event>
+		<event type="Button" key="Play"/>
+		<event type="Button" key="Play"/>
+		<event type="Button" key="Play"/>
+		<event type="Button" key="Play"/>
+		<event type="Wait" id="Wait for idle" state="Game-Idle" timeout="3" units="Seconds"/>
+		<event type="Insert-Credit" value="2048" when-below="512"/>
+	</event>
+	<output filename="robotlogs/eventsfile.txt" append="False"/>
+</event>
