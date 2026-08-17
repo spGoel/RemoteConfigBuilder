@@ -8,6 +8,8 @@ from tkinter import ttk, filedialog, messagebox, scrolledtext
 import copy
 import datetime
 import json
+import sys
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -23,6 +25,7 @@ RECENT_FILE    = Path.home() / ".robot_config_builder_recent.json"
 MAX_RECENT     = 5
 APP_TITLE      = "Robot Config Builder"
 DEFAULT_XML    = Path(__file__).parent / "default.xml"
+ROBOT_XML      = Path(__file__).parent / "robot.xml"
 TEMPLATES_DIR  = Path(__file__).parent / "templates"
 
 
@@ -360,10 +363,7 @@ class App(tk.Tk):
         self._set_status(f"Opened: {path}")
 
     def action_save(self):
-        if self.current_file is None:
-            self.action_save_as()
-        else:
-            self._save_to(self.current_file)
+        self._save_to(str(ROBOT_XML))
 
     def action_save_as(self):
         initial = (str(Path(self.current_file).parent)
@@ -391,7 +391,8 @@ class App(tk.Tk):
             self.modified = False
             self._update_title()
             self._add_recent(path)
-            self._set_status(f"Saved: {path}")
+            self._set_status(f"Saved locally: {path}")
+            self._push_to_egm_if_configured(path)
         except Exception as exc:
             messagebox.showerror("Save Error", f"Failed to save:\n{exc}")
 
@@ -532,6 +533,92 @@ class App(tk.Tk):
     def _on_close(self):
         if self._confirm_discard():
             self.destroy()
+
+    # ═══ EGM Upload ════════════════════════════════════════════
+
+    def _push_to_egm_if_configured(self, local_path: str):
+        ip         = self._machine_ip_var.get().strip()
+        build_path = self._machine_build_path_var.get().strip()
+        if not ip or not build_path:
+            return  # not configured — local save only
+        self._set_status(f"Saved locally. Uploading to EGM {ip}…")
+        threading.Thread(
+            target=self._egm_upload_worker,
+            args=(local_path, ip, build_path),
+            daemon=True,
+        ).start()
+
+    def _egm_upload_worker(self, local_path: str, ip: str, build_path: str):
+        try:
+            import paramiko
+        except ImportError:
+            self.after(0, self._set_status,
+                       f"EGM upload skipped: paramiko not installed. "
+                       f"Run: \"{sys.executable}\" -m pip install paramiko")
+            return
+
+        try:
+            client = paramiko.SSHClient()
+            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            client.connect(ip, username="mk7", password="mk7", timeout=15)
+
+            # Find immediate subdirectories of build_path that start with "host"
+            _, stdout, _ = client.exec_command(
+                f"find '{build_path}' -maxdepth 1 -type d -name 'host*' 2>/dev/null"
+            )
+            stdout.channel.recv_exit_status()
+            host_dirs = [p.strip() for p in stdout.read().decode().splitlines() if p.strip()]
+
+            if not host_dirs:
+                client.close()
+                self.after(0, messagebox.showerror, "EGM Upload",
+                           f"No folder starting with 'host' found in:\n{build_path}")
+                return
+
+            sftp         = client.open_sftp()
+            uploaded     = []
+            not_config   = []
+
+            with open(local_path, "rb") as local_file:
+                xml_bytes = local_file.read()
+
+            for host_dir in host_dirs:
+                robotlogs = f"{host_dir}/common/build/robotlogs"
+
+                # Check the robotlogs folder exists
+                _, chk, _ = client.exec_command(
+                    f"test -d '{robotlogs}' && echo yes || echo no"
+                )
+                chk.channel.recv_exit_status()
+                exists = chk.read().decode().strip() == "yes"
+
+                if exists:
+                    import io
+                    sftp.putfo(io.BytesIO(xml_bytes), f"{robotlogs}/robot.xml")
+                    uploaded.append(f"{robotlogs}/robot.xml")
+                else:
+                    not_config.append(robotlogs)
+
+            sftp.close()
+            client.close()
+
+            self.after(0, self._on_egm_upload_done, uploaded, not_config)
+
+        except Exception as exc:
+            self.after(0, self._set_status, f"EGM upload failed: {exc}")
+
+    def _on_egm_upload_done(self, uploaded: list, not_config: list):
+        if uploaded:
+            self._set_status(
+                f"robot.xml uploaded to {len(uploaded)} EGM location(s).")
+
+        for path in not_config:
+            messagebox.showwarning(
+                "Not a Configurable Build",
+                f"Path:  {path}\n\n"
+                f"This is not a configurable build folder.\n"
+                f"robot.xml was not copied here.",
+            )
 
     def _open_email_dialog(self):
         if not self._machine_ip_var.get().strip():
