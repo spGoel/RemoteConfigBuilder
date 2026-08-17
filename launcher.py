@@ -24,19 +24,21 @@ TOOLS = [
     },
     {
         "num":         "2",
-        "title":       "Generate Robot Config",
-        "desc":        "Coming soon.",
-        "script":      None,
-        "available":   False,
-    },
-    {
-        "num":         "3",
         "title":       "Generate Customised Robot",
         "desc":        "Visual XML editor with templates, live preview,\n"
                        "drag-and-drop tree, and coordinate picker.",
         "script":      BASE_DIR / "robot_config_builder" / "main.py",
         "available":   True,
     },
+    {
+        "num":         "3",
+        "title":       "Memory Monitor",
+        "desc":      "Real-time graph of Memory, CMR, CPU and other\n"
+                     "machine metrics streamed live from the game machine\n"
+                     "via TCP socket during a robot run.",
+        "script":      None,
+        "available":   False,
+    },    
 ]
 
 # ── Palette ──────────────────────────────────────────────────────────────────
