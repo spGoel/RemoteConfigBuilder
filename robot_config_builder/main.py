@@ -13,6 +13,7 @@ from typing import Optional
 
 import snapshot_manager
 from coordinate_picker import ProgressDialog
+from email_dialog import EmailDialog
 from models import RobotNode
 import xml_io
 from tree_panel import TreePanel
@@ -123,32 +124,43 @@ class App(tk.Tk):
         btn("↓ Down", lambda: self.tree_panel.move_selected(1))
         btn("Dup",    lambda: self.tree_panel.duplicate_selected())
         btn("Delete", lambda: self.tree_panel.delete_selected())
+        sep()
+        btn("Email",  self._open_email_dialog)
 
         self._build_machine_bar()
 
     def _build_machine_bar(self):
         """Persistent game-machine settings bar — always visible below the main toolbar."""
         _s = snapshot_manager.load_settings()
-        self._machine_ip_var = tk.StringVar(value=_s.get("ip", ""))
-        self._machine_or_var = tk.StringVar(
+        self._machine_ip_var         = tk.StringVar(value=_s.get("ip", ""))
+        self._machine_or_var         = tk.StringVar(
             value=_s.get("orientation", "landscape").capitalize())
-        self._machine_status_var = tk.StringVar(value="")
+        self._machine_build_path_var = tk.StringVar(value=_s.get("build_path", ""))
+        self._machine_status_var     = tk.StringVar(value="")
 
         bar = ttk.Frame(self, relief=tk.GROOVE, borderwidth=1)
         bar.pack(side=tk.TOP, fill=tk.X, padx=4, pady=(0, 2))
 
         ttk.Label(bar, text="Game Machine:", padding=(4, 0)).pack(side=tk.LEFT)
+
         ttk.Label(bar, text="IP:").pack(side=tk.LEFT)
         ttk.Entry(bar, textvariable=self._machine_ip_var, width=18).pack(
             side=tk.LEFT, padx=(2, 8))
+
         ttk.Label(bar, text="Screen:").pack(side=tk.LEFT)
         ttk.Combobox(
             bar, textvariable=self._machine_or_var,
             values=["Portrait", "Landscape"],
             state="readonly", width=11,
         ).pack(side=tk.LEFT, padx=(2, 8))
+
+        ttk.Label(bar, text="Build Path:").pack(side=tk.LEFT)
+        ttk.Entry(bar, textvariable=self._machine_build_path_var, width=28).pack(
+            side=tk.LEFT, padx=(2, 8))
+
         ttk.Button(bar, text="Refresh Screenshot",
                    command=self._refresh_screenshot).pack(side=tk.LEFT)
+
         ttk.Label(bar, textvariable=self._machine_status_var,
                   foreground="#666", padding=(8, 0)).pack(side=tk.LEFT)
 
@@ -156,11 +168,13 @@ class App(tk.Tk):
             snapshot_manager.save_settings(
                 self._machine_ip_var.get(),
                 self._machine_or_var.get().lower(),
+                self._machine_build_path_var.get(),
             )
             self._update_machine_status()
 
         self._machine_ip_var.trace_add("write", _persist)
         self._machine_or_var.trace_add("write", _persist)
+        self._machine_build_path_var.trace_add("write", _persist)
         self._update_machine_status()
 
     def _update_machine_status(self):
@@ -518,6 +532,15 @@ class App(tk.Tk):
     def _on_close(self):
         if self._confirm_discard():
             self.destroy()
+
+    def _open_email_dialog(self):
+        if not self._machine_ip_var.get().strip():
+            messagebox.showwarning(
+                "IP Not Configured",
+                "Please configure the Game Machine IP address first.",
+            )
+            return
+        EmailDialog(self, self._machine_ip_var, self._machine_build_path_var)
 
     def _show_about(self):
         messagebox.showinfo(

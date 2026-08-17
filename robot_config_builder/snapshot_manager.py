@@ -27,12 +27,16 @@ def load_settings() -> dict:
             return data
     except Exception:
         pass
-    return {"ip": "", "orientation": "landscape"}
+    return {"ip": "", "orientation": "landscape", "build_path": ""}
 
 
-def save_settings(ip: str, orientation: str):
+def save_settings(ip: str, orientation: str, build_path: str = ""):
     try:
-        SETTINGS_FILE.write_text(json.dumps({"ip": ip, "orientation": orientation}))
+        SETTINGS_FILE.write_text(json.dumps({
+            "ip": ip,
+            "orientation": orientation,
+            "build_path": build_path,
+        }))
     except Exception:
         pass
 
