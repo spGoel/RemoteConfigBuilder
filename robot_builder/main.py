@@ -3,11 +3,13 @@ Aristocrat Robot Builder — upload Linux_BuildScript.sh to a remote Linux machi
 run it inside a named GNU Screen session, stream live output back here.
 """
 import io
+import posixpath
 import threading
 import time
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
 from pathlib import Path
+from typing import Tuple
 
 # ── Palette ───────────────────────────────────────────────────────────────────
 C_ACCENT   = "#5B3EA6"
@@ -26,6 +28,9 @@ SSH_PASS = "mk7"
 REMOTE_SCRIPT_NAME = "Linux_BuildScript.sh"
 REMOTE_LOG_NAME    = "robot_build.log"
 SCREEN_NAME        = "robot_build"
+PROMPT_LINE        = r"export PS1='\u@\h:\w\$ '"
+LOCALE_LINES       = ("export LANG=C", "export LC_ALL=C")
+SHELL_BLOCK_MARKER = "# Robot Builder shell defaults"
 
 # ── Build options ─────────────────────────────────────────────────────────────
 TARGETS      = ["gli", "nsw", "qcom", "asp"]
@@ -388,6 +393,14 @@ class RobotBuilderApp(tk.Tk):
             if self._stop_event.is_set():
                 return
 
+            self.after(0, self._log_append, "[build] Checking remote shell defaults…\n", "info")
+            shell_setup = self._ensure_remote_shell_defaults(ssh)
+            if shell_setup:
+                self.after(0, self._log_append, shell_setup, "dim")
+
+            if self._stop_event.is_set():
+                return
+
             # Upload patched script from memory — no temp file needed
             self.after(0, self._log_append, "[build] Uploading build script…\n", "info")
             sftp = ssh.open_sftp()
@@ -446,10 +459,84 @@ class RobotBuilderApp(tk.Tk):
 
     # ── SSH helpers (called from worker thread) ────────────────────────────────
 
+    def _ensure_remote_shell_defaults(self, ssh) -> str:
+        """Install prompt/locale defaults on the remote mk7 account."""
+        home = self._exec(ssh, 'printf %s "$HOME"').strip() or f"/home/{SSH_USER}"
+        changes = []
+
+        block = (
+            f"\n{SHELL_BLOCK_MARKER}\n"
+            "# Keep remote shells consistent for Robot Builder sessions.\n"
+            f"{LOCALE_LINES[0]}\n"
+            f"{LOCALE_LINES[1]}\n"
+            f"{PROMPT_LINE}\n"
+        )
+
+        sftp = ssh.open_sftp()
+        try:
+            for name in (".bashrc", ".profile"):
+                remote_path = posixpath.join(home, name)
+                if self._ensure_remote_file_block(sftp, remote_path, block):
+                    changes.append(f"[build] Updated {remote_path}\n")
+        finally:
+            sftp.close()
+
+        if self._fix_remote_system_locale(ssh):
+            changes.append("[build] Updated /etc/alx-environment LC_ALL fallback\n")
+
+        if not changes:
+            return "[build] Remote shell defaults already configured\n"
+        return "".join(changes)
+
+    @staticmethod
+    def _ensure_remote_file_block(sftp, remote_path: str, block: str) -> bool:
+        try:
+            with sftp.open(remote_path, "r") as fh:
+                content = fh.read().decode(errors="replace")
+        except IOError:
+            content = ""
+
+        required = (SHELL_BLOCK_MARKER, PROMPT_LINE, *LOCALE_LINES)
+        if all(line in content for line in required):
+            return False
+
+        separator = "" if not content or content.endswith("\n") else "\n"
+        with sftp.open(remote_path, "w") as fh:
+            fh.write((content + separator + block).encode("utf-8"))
+        return True
+
+    def _fix_remote_system_locale(self, ssh) -> bool:
+        needs_fix = (
+            "test -f /etc/alx-environment && "
+            "grep -qx 'export LC_ALL=en_US.UTF-8' /etc/alx-environment && "
+            "! locale -a 2>/dev/null | grep -Eiq '^(en_US\\.utf8|en_US\\.UTF-8)$'"
+        )
+        code, _, _ = self._exec_status(ssh, needs_fix)
+        if code != 0:
+            return False
+
+        cmd = (
+            "printf '%s\\n' 'mk7' | sudo -S -p '' sh -c "
+            "\"cp /etc/alx-environment "
+            "/etc/alx-environment.robot-builder-backup-$(date +%Y%m%d%H%M%S) && "
+            "sed -i 's/^export LC_ALL=en_US\\.UTF-8$/export LC_ALL=C/' "
+            "/etc/alx-environment\""
+        )
+        code, _, _ = self._exec_status(ssh, cmd)
+        return code == 0
+
     def _exec(self, ssh, cmd: str) -> str:
         _, stdout, _ = ssh.exec_command(cmd)
         stdout.channel.recv_exit_status()
         return stdout.read().decode(errors="replace")
+
+    @staticmethod
+    def _exec_status(ssh, cmd: str) -> Tuple[int, str, str]:
+        _, stdout, stderr = ssh.exec_command(cmd)
+        code = stdout.channel.recv_exit_status()
+        out = stdout.read().decode(errors="replace")
+        err = stderr.read().decode(errors="replace")
+        return code, out, err
 
     @staticmethod
     def _sftp_makedirs(sftp, path: str):
