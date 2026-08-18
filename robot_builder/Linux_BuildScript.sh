@@ -40,7 +40,7 @@ echo_build_type_missing()
 if [[ "${1:-}" == "--help" ]]; then
   echo ""
   echo ""
-  echo "Usage: $0 <target> <3L|5L|AVL> [--platform] [--game] [--clean] [--showmode] [--production] [--robot]"
+  echo "Usage: $0 <target> <3L|5L|AVL> [--platform] [--game] [--clean] [--showmode] [--production] [--robot] [-asan] [-tcmalloc]"
   echo_target_missing
   echo_build_type_missing
   echo "Optional Flags:"
@@ -50,6 +50,8 @@ if [[ "${1:-}" == "--help" ]]; then
   echo "  --showmode      Enable show mode"
   echo "  --production    Build production version"
   echo "  --robot         Enable autoplay robot feature"
+  echo "  -asan           Enable debug ASAN build option"
+  echo "  -tcmalloc       Enable debug tcMalloc build option"
   echo ""
   echo "Examples:"
   echo "  Build both platform and game for GLI target with 3L:"
@@ -119,6 +121,8 @@ clean_build=false
 enable_showmode=false
 is_production=false
 autoplay_robot=false
+enable_asan=false
+enable_tcmalloc=false
 
 # Parse optional flags
 while [[ $# -gt 0 ]]; do
@@ -129,6 +133,8 @@ while [[ $# -gt 0 ]]; do
         --showmode)   enable_showmode=true ;;
         --production) is_production=true ;;
         --robot)      autoplay_robot=true ;;
+        -asan)        enable_asan=true ;;
+        -tcmalloc)    enable_tcmalloc=true ;;
         *)
             echo "Unknown flag: $1" >&2
             echo "Run '$0 --help' for usage." >&2
@@ -242,6 +248,8 @@ build_platform_3L() {
     )
     $is_production   && args+=(-production)
     $enable_showmode && args+=(-show_mode)
+    $enable_asan     && args+=(-useasandefault)
+    $enable_tcmalloc && args+=(-usetcmalloc)
 
     ../../subversion/platform/common/build/configure "${args[@]}"
 
@@ -287,6 +295,8 @@ build_platform_5L() {
     )
     $is_production   && args+=(-production)
     $enable_showmode && args+=(-show_mode)
+    $enable_asan     && args+=(-useasandefault)
+    $enable_tcmalloc && args+=(-usetcmalloc)
 
     log "configure args: ${args[*]}"
     log "pwd: $PWD"
@@ -329,6 +339,8 @@ build_game_AVL() {
     $is_production   && args+=(-production)
     $enable_showmode && args+=(-show_mode)
     $autoplay_robot  && args+=(-nd_autoplay)
+    $enable_asan     && args+=(-useasandefault)
+    $enable_tcmalloc && args+=(-usetcmalloc)
 
     ../../subversion/platform/common/build/configure "${args[@]}"
 

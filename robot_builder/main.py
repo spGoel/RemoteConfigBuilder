@@ -215,6 +215,12 @@ class RobotBuilderApp(tk.Tk):
         ttk.Radiobutton(f, text="Debug",
                         variable=self._build_type_var, value="debug"
                         ).pack(anchor="w", pady=2)
+        ttk.Radiobutton(f, text="Debug Asan",
+                        variable=self._build_type_var, value="debug_asan"
+                        ).pack(anchor="w", pady=2)
+        ttk.Radiobutton(f, text="Debug tcMalloc",
+                        variable=self._build_type_var, value="debug_tcmalloc"
+                        ).pack(anchor="w", pady=2)
 
     def _action_bar(self, parent):
         bar = tk.Frame(parent, bg=C_BG, pady=6)
@@ -317,8 +323,13 @@ class RobotBuilderApp(tk.Tk):
 
     def _collected_args(self) -> list:
         args = [self._target_var.get(), self._level_var.get()]
-        if self._build_type_var.get() == "production":
+        build_type = self._build_type_var.get()
+        if build_type == "production":
             args += ["--production", "--robot"]
+        elif build_type == "debug_asan":
+            args.append("--asan")
+        elif build_type == "debug_tcmalloc":
+            args.append("--tcmalloc")
         return args
 
     def _patched_script_bytes(self) -> bytes:
