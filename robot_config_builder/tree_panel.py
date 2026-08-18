@@ -80,10 +80,12 @@ class TreePanel(ttk.Frame):
         self.refresh_tree()
 
     def refresh_tree(self, select_node: Optional[RobotNode] = None):
+        expanded_iids = self._expanded_iids()
         self.tree.delete(*self.tree.get_children())
         self.node_map.clear()
         if self.root_node:
             self._insert_node(self.root_node, "")
+        self._restore_expanded_iids(expanded_iids)
         if select_node:
             iid = str(id(select_node))
             if self.tree.exists(iid):
@@ -113,6 +115,24 @@ class TreePanel(ttk.Frame):
         self.node_map[iid] = node
         for child in node.children:
             self._insert_node(child, iid)
+
+    def _expanded_iids(self) -> set:
+        expanded = set()
+
+        def walk(iid: str):
+            if self.tree.item(iid, "open"):
+                expanded.add(iid)
+            for child_iid in self.tree.get_children(iid):
+                walk(child_iid)
+
+        for root_iid in self.tree.get_children():
+            walk(root_iid)
+        return expanded
+
+    def _restore_expanded_iids(self, expanded_iids: set):
+        for iid in expanded_iids:
+            if self.tree.exists(iid):
+                self.tree.item(iid, open=True)
 
     def _selected_iid(self) -> Optional[str]:
         sel = self.tree.selection()
