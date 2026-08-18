@@ -248,6 +248,7 @@ build_platform_3L() {
     )
     $is_production   && args+=(-production)
     $enable_showmode && args+=(-show_mode)
+    $autoplay_robot  && args+=(-nd_autoplay)
     $enable_asan     && args+=(-useasandefault)
     $enable_tcmalloc && args+=(-usetcmalloc)
 
@@ -295,6 +296,7 @@ build_platform_5L() {
     )
     $is_production   && args+=(-production)
     $enable_showmode && args+=(-show_mode)
+    $autoplay_robot  && args+=(-nd_autoplay)
     $enable_asan     && args+=(-useasandefault)
     $enable_tcmalloc && args+=(-usetcmalloc)
 
@@ -339,8 +341,6 @@ build_game_AVL() {
     $is_production   && args+=(-production)
     $enable_showmode && args+=(-show_mode)
     $autoplay_robot  && args+=(-nd_autoplay)
-    $enable_asan     && args+=(-useasandefault)
-    $enable_tcmalloc && args+=(-usetcmalloc)
 
     ../../subversion/platform/common/build/configure "${args[@]}"
 
