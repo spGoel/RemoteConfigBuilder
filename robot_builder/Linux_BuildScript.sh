@@ -53,6 +53,10 @@ if [[ "${1:-}" == "--help" ]]; then
   echo "  -asan           Enable debug ASAN build option"
   echo "  -tcmalloc       Enable debug tcMalloc build option"
   echo ""
+  echo "5L Robot Build:"
+  echo "  5L game builds also checkout Configurable Robot source into ./robot,"
+  echo "  configure it from build/robot, and build librobot_test.so."
+  echo ""
   echo "Examples:"
   echo "  Build both platform and game for GLI target with 3L:"
   echo "    ./LandBased_Linux_BuildScript.sh gli 3L"
@@ -69,6 +73,10 @@ fi
 
 # --- Global set inside checkout functions -------------------------------------
 m_gamePath=""
+m_robotPath=""
+
+# --- Configurable Robot source ------------------------------------------------
+ROBOT_5L_PATH="https://svn.ali.global/nAble/Development/GDK5L/Test/Automation_Script/Configurable_Robot_5L/Robot"
 
 # --- Read positional arguments ------------------------------------------------
 target="${1:-}"
@@ -133,8 +141,8 @@ while [[ $# -gt 0 ]]; do
         --showmode)   enable_showmode=true ;;
         --production) is_production=true ;;
         --robot)      autoplay_robot=true ;;
-        -asan)        enable_asan=true ;;
-        -tcmalloc)    enable_tcmalloc=true ;;
+        --asan|-asan)           enable_asan=true ;;
+        --tcmalloc|-tcmalloc)   enable_tcmalloc=true ;;
         *)
             echo "Unknown flag: $1" >&2
             echo "Run '$0 --help' for usage." >&2
@@ -210,6 +218,8 @@ checkout_sources_5L() {
 
     [ ! -d platform ] && svn checkout "$platform_path" platform
     [ ! -d Runtime ]  && svn checkout "$runtime_path"
+    [ ! -d robot ] && svn checkout "$ROBOT_5L_PATH" robot
+    m_robotPath="$ROOT_DIR/robot"
 
     mkdir -p SampleGames
     cd SampleGames
@@ -322,6 +332,46 @@ build_game_5L() {
     fi
 }
 
+build_robot_5L() {
+    cd "$ROOT_DIR"
+
+    if [[ -z "$m_robotPath" ]]; then
+        m_robotPath="$ROOT_DIR/robot"
+    fi
+    if [[ ! -d "$m_robotPath" ]]; then
+        echo "Robot source folder not found: $m_robotPath" >&2
+        echo "Expected SVN checkout: $ROBOT_5L_PATH" >&2
+        exit 1
+    fi
+
+    game_checkout_dir="$(basename "$m_gamePath")"
+    game_output_name="$(printf '%s' "$game_checkout_dir" | tr '[:upper:]' '[:lower:]')"
+    robot_build_dir="$ROOT_DIR/build/robot"
+    game_binary_dir="$ROOT_DIR/build/game/$game_output_name"
+
+    log "Configuring configurable robot test library"
+    mkdir -p "$robot_build_dir"
+    cd "$robot_build_dir"
+    cmake \
+        -DCMAKE_TOOLCHAIN_FILE=../../platform/common/component/mk7i-toolchain.cmake \
+        -DPLATFORM_BUILD_DIR=../host/ \
+        -DOUTPUT_DIR="../game/$game_output_name" \
+        ../../robot/
+
+    if [[ ! -d "$game_binary_dir" ]]; then
+        echo "Game binaries folder not found: $game_binary_dir" >&2
+        echo "Build the game first, then re-run the robot build." >&2
+        exit 1
+    fi
+
+    log "Building librobot_test.so"
+    cd "$game_binary_dir"
+    make -C ../../robot
+
+    log "Robot XML location: $ROOT_DIR/build/host/common/build/robotlogs/robot.xml"
+    log "Default robot event log: $ROOT_DIR/build/host/common/build/robotlogs/eventsfile.txt"
+}
+
 # Note: AVL's "game" build actually configures both gameplatform and game
 # in one pass, so the main dispatch only calls this (there is no separate
 # build_platform_AVL).
@@ -362,7 +412,10 @@ if [[ "$build_level" == "3L" ]]; then
 elif [[ "$build_level" == "5L" ]]; then
     checkout_sources_5L
     $build_platform && build_platform_5L
-    $build_game     && build_game_5L
+    if $build_game; then
+        build_game_5L
+        build_robot_5L
+    fi
 else
     checkout_sources_AVL
     $build_game && build_game_AVL
