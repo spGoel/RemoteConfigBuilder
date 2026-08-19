@@ -1,0 +1,61 @@
+<event type="Sequence">
+	<meter-list timeout="15" units="Seconds">
+		<output filename="robotlogs/eventsfile.txt" append="False"/>
+		<meter>Video-Used-Memory</meter>
+		<meter>Video-Free-Memory</meter>
+		<meter>Video-Total-Memory</meter>
+		<meter>Used-Memory</meter>
+		<meter>Free-Memory</meter>
+		<meter>Total-Memory</meter>
+		<meter>File-Buffer-Cache</meter>
+		<meter>Page-Cache</meter>
+		<meter>Real-Free-Memory</meter>
+		<meter>CMR</meter>
+		<meter>Max-CMR</meter>
+		<meter>Sys-CPU</meter>
+		<meter>User-CPU</meter>
+		<meter>Idle-CPU</meter>
+		<meter>Games-Played</meter>
+		<meter>Turnover</meter>
+		<meter>Total-Win</meter>
+		<meter>Credit</meter>
+		<meter>Bet</meter>
+		<meter>Last-Win</meter>
+		<meter>Hopper-Pay</meter>
+		<meter>Jackpot</meter>
+	</meter-list>
+	<!-- Helix Standard — game switching loop -->
+	<event type="Sequence">
+		<!-- choose denomination -->
+		<event type="Random">
+			<event type="Touch-Screen" weight="40">
+				<point x="1926" y="1440"/>
+			</event>
+		</event>
+		<event type="Wait" id="Wait for idle" state="Game-Idle" timeout="3" units="Seconds"/>
+		<event type="Touch-Screen">
+			<point x="1926" y="1440"/>
+		</event>
+		<event type="Insert-Credit" value="2048" when-below="512"/>
+		<event type="Wait" id="Wait for idle" state="Game-Idle" timeout="2" units="Seconds"/>
+		<event type="Button" key="Play"/>
+		<event type="Wait" timeout="3" units="Seconds"/>
+		<!-- touch games menu — return to lobby -->
+		<event type="Touch-Screen" weight="500">
+			<point x="261" y="2106"/>
+		</event>
+		<event type="Wait" timeout="3" units="Seconds"/>
+		<event type="Touch-Screen">
+			<point x="261" y="2106"/>
+		</event>
+		<event type="Wait" timeout="3" units="Seconds"/>
+		<event type="Touch-Screen">
+			<point x="261" y="2106"/>
+		</event>
+		<event type="Wait" id="Wait for idle" state="Game-Idle" timeout="3" units="Seconds"/>
+	</event>
+	<event type="Button" key="Play"/>
+	<event type="Clear-Jackpot"/>
+	<output filename="robotlogs/eventsfile.txt" append="False"/>
+</event>
+</event>
