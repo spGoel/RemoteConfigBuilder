@@ -354,7 +354,7 @@ build_robot_5L() {
     cd "$robot_build_dir"
     cmake \
         -DCMAKE_TOOLCHAIN_FILE=../../platform/common/component/mk7i-toolchain.cmake \
-        -DPLATFORM_BUILD_DIR=../host/ \
+        -DPLATFORM_BUILD_DIR=../$$build_dir/ \
         -DOUTPUT_DIR="../game/$game_output_name" \
         ../../robot/
 
