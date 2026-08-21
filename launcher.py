@@ -1,193 +1,244 @@
 """
-Aristocrat Robot Tools — top-level launcher.
-Each option opens a separate tool. More tools are added over time.
+Aristocrat Robot Tools - tabbed top-level launcher.
+Each tool runs inside one shared window instead of opening a new process/window.
 """
-import subprocess
+import importlib.util
 import sys
 import tkinter as tk
+from tkinter import ttk, messagebox
 from pathlib import Path
 
-PYTHON   = sys.executable
 BASE_DIR = Path(__file__).parent
 
-# ── Tool registry ────────────────────────────────────────────────────────────
-# Add new tools here; set script=None and available=False for placeholders.
+# Palette shared with the tools.
+C_ACCENT = "#5B3EA6"
+C_ACCENT_L = "#7457C4"
+C_BG = "#F3F0FA"
+C_SURFACE = "#FFFFFF"
+C_TEXT = "#1A1820"
+C_MUTED = "#5C5870"
+C_WHITE = "#FFFFFF"
+
+
 TOOLS = [
     {
-        "num":         "1",
-        "title":       "Robot Builder",
-        "desc":        "Build 3L / 5L / AVL robots on a remote Linux machine.\n"
-                       "Uploads script via SSH, runs in a screen session,\n"
-                       "and streams live build output to this window.",
-        "script":      BASE_DIR / "robot_builder" / "main.py",
-        "available":   True,
+        "key": "builder",
+        "title": "Robot Builder",
+        "subtitle": "Build 3L / 5L / AVL robots on a remote Linux machine",
+        "script": BASE_DIR / "robot_builder" / "main.py",
+        "class_name": "RobotBuilderApp",
+        "available": True,
     },
     {
-        "num":         "2",
-        "title":       "Generate Customised Robot",
-        "desc":        "Visual XML editor with templates, live preview,\n"
-                       "drag-and-drop tree, and coordinate picker.",
-        "script":      BASE_DIR / "robot_config_builder" / "main.py",
-        "available":   True,
+        "key": "config",
+        "title": "Config Builder",
+        "subtitle": "Compose, edit, preview, and save configurable robot XML",
+        "script": BASE_DIR / "robot_config_builder" / "main.py",
+        "class_name": "App",
+        "available": True,
     },
     {
-        "num":         "3",
-        "title":       "Memory Monitor",
-        "desc":      "Real-time graph of Memory, CMR, CPU and other\n"
-                     "machine metrics streamed live from the game machine\n"
-                     "via TCP socket during a robot run.",
-        "script":      None,
-        "available":   False,
-    },    
+        "key": "memory",
+        "title": "Memory Monitor",
+        "subtitle": "Live machine metrics during robot runs",
+        "script": None,
+        "class_name": None,
+        "available": False,
+    },
 ]
 
-# ── Palette ──────────────────────────────────────────────────────────────────
-C_ACCENT   = "#5B3EA6"
-C_ACCENT_L = "#7457C4"
-C_BG       = "#F3F0FA"
-C_SURFACE  = "#FFFFFF"
-C_SURFACE_D= "#F8F7FC"
-C_TEXT     = "#1A1820"
-C_MUTED    = "#5C5870"
-C_DISABLED = "#AAAAAA"
-C_BORDER_A = "#DDD9EF"
-C_BADGE_D  = "#E0DCF0"
-C_WHITE    = "#FFFFFF"
+
+def _load_tool_class(tool: dict):
+    script = tool.get("script")
+    if not script or not Path(script).exists():
+        raise FileNotFoundError(f"Script not found: {script}")
+
+    script = Path(script)
+    tool_dir = str(script.parent)
+    if tool_dir not in sys.path:
+        sys.path.insert(0, tool_dir)
+
+    module_name = f"robot_tools_{tool['key']}_main"
+    spec = importlib.util.spec_from_file_location(module_name, script)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Could not load module from {script}")
+
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return getattr(module, tool["class_name"])
 
 
 class LauncherApp(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Aristocrat Robot Tools")
-        self.resizable(False, False)
+        self.geometry("1320x820")
+        self.minsize(980, 640)
         self.configure(bg=C_BG)
+        self._tool_apps = {}
+
+        self._configure_styles()
         self._build_ui()
         self._center()
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
 
-    # ── Layout ───────────────────────────────────────────────────────────────
+    def _configure_styles(self):
+        self._style = ttk.Style(self)
+        self._style.configure(
+            "RobotTools.TNotebook",
+            background=C_BG,
+            borderwidth=0,
+            tabmargins=(8, 8, 8, 0),
+        )
+        self._style.configure(
+            "RobotTools.TNotebook.Tab",
+            font=("Segoe UI", 11, "bold"),
+            padding=(28, 12),
+        )
+        self._style.map(
+            "RobotTools.TNotebook.Tab",
+            background=[("selected", C_SURFACE)],
+            foreground=[("selected", C_ACCENT), ("!selected", C_TEXT)],
+        )
+        self._style.configure("RobotTools.TFrame", background=C_BG)
 
     def _build_ui(self):
         self._build_header()
-        self._build_cards()
+        self._build_tabs()
 
     def _build_header(self):
         hdr = tk.Frame(self, bg=C_ACCENT)
         hdr.pack(fill=tk.X)
 
         tk.Label(
-            hdr, text="Aristocrat Robot Tools",
+            hdr,
+            text="Aristocrat Robot Tools",
             font=("Segoe UI", 15, "bold"),
-            bg=C_ACCENT, fg=C_WHITE, pady=14,
+            bg=C_ACCENT,
+            fg=C_WHITE,
+            pady=12,
         ).pack()
 
         tk.Label(
-            hdr, text="Select a tool to launch",
+            hdr,
+            text="Build robots, edit robot.xml, and monitor runs from one workspace",
             font=("Segoe UI", 9),
-            bg=C_ACCENT, fg="#C4B4F4", pady=0,
+            bg=C_ACCENT,
+            fg="#C4B4F4",
         ).pack()
 
-        # Bottom fade strip
         tk.Frame(hdr, bg=C_ACCENT_L, height=3).pack(fill=tk.X, pady=(10, 0))
 
-    def _build_cards(self):
-        body = tk.Frame(self, bg=C_BG, padx=24, pady=20)
-        body.pack(fill=tk.BOTH)
+    def _build_tabs(self):
+        shell = tk.Frame(self, bg=C_BG, padx=10, pady=10)
+        shell.pack(fill=tk.BOTH, expand=True)
+
+        self.notebook = ttk.Notebook(shell, style="RobotTools.TNotebook")
+        self.notebook.pack(fill=tk.BOTH, expand=True)
 
         for tool in TOOLS:
-            self._card(body, tool)
+            tab = ttk.Frame(self.notebook, style="RobotTools.TFrame")
+            self.notebook.add(tab, text=tool["title"])
+            content = self._tab_content(tab, tool)
+            if tool["available"]:
+                self._mount_tool(content, tool)
+            else:
+                self._placeholder(content, tool)
 
-        # Footer
+    def _tab_content(self, tab, tool: dict):
+        header = tk.Frame(tab, bg=C_SURFACE, padx=18, pady=12)
+        header.pack(fill=tk.X)
+
+        tk.Label(
+            header,
+            text=tool["title"],
+            font=("Segoe UI", 13, "bold"),
+            bg=C_SURFACE,
+            fg=C_TEXT,
+            anchor="w",
+        ).pack(side=tk.LEFT)
+
+        tk.Label(
+            header,
+            text=tool.get("subtitle", ""),
+            font=("Segoe UI", 9),
+            bg=C_SURFACE,
+            fg=C_MUTED,
+            anchor="w",
+        ).pack(side=tk.LEFT, padx=(14, 0))
+
+        tk.Frame(tab, bg="#DDD9EF", height=1).pack(fill=tk.X)
+        content = tk.Frame(tab, bg=C_BG)
+        content.pack(fill=tk.BOTH, expand=True)
+        return content
+
+    def _mount_tool(self, tab, tool: dict):
+        try:
+            tool_class = _load_tool_class(tool)
+            app = tool_class(tab, standalone=False)
+            app.pack(fill=tk.BOTH, expand=True)
+            self._tool_apps[tool["key"]] = app
+        except Exception as exc:
+            self._error_tab(tab, tool, exc)
+
+    def _placeholder(self, tab, tool: dict):
+        body = tk.Frame(tab, bg=C_BG, padx=28, pady=24)
+        body.pack(fill=tk.BOTH, expand=True)
         tk.Label(
             body,
-            text="More tools will be added in future iterations.",
-            font=("Segoe UI", 8), bg=C_BG, fg=C_DISABLED,
-        ).pack(pady=(8, 0))
-
-    def _card(self, parent, tool):
-        avail      = tool["available"]
-        bg         = C_SURFACE   if avail else C_SURFACE_D
-        border     = C_ACCENT    if avail else C_BADGE_D
-        title_fg   = C_TEXT      if avail else C_DISABLED
-        desc_fg    = C_MUTED     if avail else C_DISABLED
-        badge_bg   = C_ACCENT    if avail else C_DISABLED
-
-        # 1-px border via outer frame
-        outer = tk.Frame(parent, bg=border, padx=1, pady=1)
-        outer.pack(fill=tk.X, pady=5)
-
-        inner = tk.Frame(outer, bg=bg, padx=14, pady=11)
-        inner.pack(fill=tk.X)
-
-        # Number badge
-        tk.Label(
-            inner, text=tool["num"],
-            font=("Segoe UI", 11, "bold"),
-            bg=badge_bg, fg=C_WHITE,
-            width=2, anchor="center", pady=3,
-        ).pack(side=tk.LEFT, padx=(0, 14))
-
-        # Text block
-        txt = tk.Frame(inner, bg=bg)
-        txt.pack(side=tk.LEFT, fill=tk.X, expand=True)
-
-        tk.Label(
-            txt, text=tool["title"],
-            font=("Segoe UI", 10, "bold"),
-            bg=bg, fg=title_fg, anchor="w",
+            text="Coming soon.",
+            font=("Segoe UI", 11),
+            bg=C_BG,
+            fg=C_MUTED,
+            anchor="w",
         ).pack(fill=tk.X)
 
+    def _error_tab(self, tab, tool: dict, exc: Exception):
+        body = tk.Frame(tab, bg=C_SURFACE, padx=28, pady=24)
+        body.pack(fill=tk.BOTH, expand=True)
         tk.Label(
-            txt, text=tool["desc"],
-            font=("Segoe UI", 8),
-            bg=bg, fg=desc_fg, anchor="w",
-            justify=tk.LEFT, wraplength=280,
+            body,
+            text=f"{tool['title']} could not be loaded",
+            font=("Segoe UI", 12, "bold"),
+            bg=C_SURFACE,
+            fg="#B71C1C",
+            anchor="w",
         ).pack(fill=tk.X)
+        tk.Label(
+            body,
+            text=str(exc),
+            font=("Consolas", 9),
+            bg=C_SURFACE,
+            fg=C_TEXT,
+            justify=tk.LEFT,
+            anchor="w",
+            wraplength=900,
+        ).pack(fill=tk.X, pady=(8, 0))
 
-        # Right-side action
-        if avail:
-            btn = tk.Button(
-                inner, text="Launch  →",
-                font=("Segoe UI", 9, "bold"),
-                bg=C_ACCENT, fg=C_WHITE,
-                activebackground=C_ACCENT_L, activeforeground=C_WHITE,
-                relief=tk.FLAT, cursor="hand2",
-                padx=14, pady=5,
-                command=lambda t=tool: self._launch(t),
-            )
-            btn.pack(side=tk.RIGHT, padx=(12, 0))
-            # Hover effect
-            btn.bind("<Enter>", lambda e, b=btn: b.config(bg=C_ACCENT_L))
-            btn.bind("<Leave>", lambda e, b=btn: b.config(bg=C_ACCENT))
-        else:
-            tk.Label(
-                inner, text="Coming Soon",
-                font=("Segoe UI", 7, "bold"),
-                bg=C_BADGE_D, fg=C_DISABLED,
-                padx=8, pady=3,
-            ).pack(side=tk.RIGHT, padx=(12, 0))
-
-    # ── Actions ──────────────────────────────────────────────────────────────
-
-    def _launch(self, tool):
-        script = tool.get("script")
-        if not script or not Path(script).exists():
-            tk.messagebox.showerror(
-                "Launch Error",
-                f"Script not found:\n{script}",
-                parent=self,
-            )
+    def _on_close(self):
+        config_app = self._tool_apps.get("config")
+        if config_app is not None and not config_app._confirm_discard():
             return
-        subprocess.Popen(
-            [PYTHON, str(script)],
-            cwd=str(Path(script).parent),
-        )
+
+        builder_app = self._tool_apps.get("builder")
+        if builder_app is not None and getattr(builder_app, "_build_active", False):
+            if not messagebox.askyesno(
+                "Build Running",
+                "A robot build is still running. Stop it and close the tools?",
+                parent=self,
+            ):
+                return
+            builder_app._stop()
+
+        self.destroy()
 
     def _center(self):
         self.update_idletasks()
-        w  = self.winfo_width()
-        h  = self.winfo_height()
         sw = self.winfo_screenwidth()
         sh = self.winfo_screenheight()
+        w = self.winfo_width()
+        h = self.winfo_height()
         self.geometry(f"+{(sw - w) // 2}+{(sh - h) // 2}")
 
 

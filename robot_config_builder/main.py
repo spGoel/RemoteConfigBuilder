@@ -27,14 +27,25 @@ APP_TITLE      = "Robot Config Builder"
 DEFAULT_XML    = Path(__file__).parent / "default.xml"
 ROBOT_XML      = Path(__file__).parent / "robot.xml"
 TEMPLATES_DIR  = Path(__file__).parent / "templates"
+C_BG           = "#F3F0FA"
+C_SURFACE      = "#FFFFFF"
+C_ACCENT       = "#5B3EA6"
+C_TEXT         = "#1A1820"
 
 
-class App(tk.Tk):
-    def __init__(self):
-        super().__init__()
-        self.title(APP_TITLE)
-        self.geometry("1300x760")
-        self.minsize(900, 520)
+class App(tk.Frame):
+    def __init__(self, master=None, standalone: bool = False):
+        if master is None:
+            master = tk.Tk()
+            standalone = True
+        super().__init__(master, bg=C_BG)
+        self._standalone = standalone
+        self._root_window = self.winfo_toplevel()
+        self._menubar = None
+        if self._standalone:
+            self._root_window.title(APP_TITLE)
+            self._root_window.geometry("1300x760")
+            self._root_window.minsize(900, 520)
 
         self.root_node: Optional[RobotNode] = None
         self.current_file: Optional[str] = None
@@ -44,8 +55,10 @@ class App(tk.Tk):
 
         self._build_ui()
         self._bind_keys()
+        if self._standalone:
+            self.pack(fill=tk.BOTH, expand=True)
         if not self._load_default():
-            self.after(0, self.destroy)
+            self.after(0, self._root_window.destroy if self._standalone else self.destroy)
 
     # ═══ UI Build ══════════════════════════════════════════════
 
@@ -54,15 +67,44 @@ class App(tk.Tk):
         self._build_toolbar()
         self._build_main_area()
         self._build_status_bar()
-        self.protocol("WM_DELETE_WINDOW", self._on_close)
+        if self._standalone:
+            self._root_window.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _build_menu(self):
-        menubar = tk.Menu(self)
-        self.configure(menu=menubar)
+        if self._standalone:
+            menubar = tk.Menu(self._root_window)
+            self._menubar = menubar
+            self._root_window.configure(menu=menubar)
+        else:
+            menubar = ttk.Frame(self, relief=tk.GROOVE)
+            menubar.pack(side=tk.TOP, fill=tk.X, padx=12, pady=(12, 2))
+            self._menubar = None
+
+        def menu(label: str) -> tk.Menu:
+            if self._standalone:
+                m = tk.Menu(menubar, tearoff=0)
+                menubar.add_cascade(label=label, menu=m)
+                return m
+
+            btn = tk.Menubutton(
+                menubar,
+                text=label,
+                font=("Segoe UI", 9),
+                relief=tk.FLAT,
+                padx=12,
+                pady=4,
+                bg=C_SURFACE,
+                fg=C_TEXT,
+                activebackground="#E8E4F3",
+                activeforeground=C_ACCENT,
+            )
+            m = tk.Menu(btn, tearoff=0)
+            btn.configure(menu=m)
+            btn.pack(side=tk.LEFT, padx=(0, 2))
+            return m
 
         # File
-        self._file_menu = fm = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="File", menu=fm)
+        self._file_menu = fm = menu("File")
         fm.add_command(label="New\t\tCtrl+N",        command=self.action_new)
         fm.add_command(label="Open...\t\tCtrl+O",    command=self.action_open)
         fm.add_separator()
@@ -75,8 +117,7 @@ class App(tk.Tk):
         self._rebuild_recent_menu()
 
         # Edit
-        em = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="Edit", menu=em)
+        em = menu("Edit")
         em.add_command(label="Undo\t\tCtrl+Z",       command=self.action_undo)
         em.add_separator()
         em.add_command(label="Duplicate\tCtrl+D",
@@ -90,8 +131,7 @@ class App(tk.Tk):
                        command=lambda: self.tree_panel.move_selected(1))
 
         # Templates — loaded from templates/ folder
-        tm = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="Templates", menu=tm)
+        tm = menu("Templates")
         if TEMPLATES_DIR.exists():
             xml_files = sorted(TEMPLATES_DIR.glob("*.xml"))
             for f in xml_files:
@@ -102,13 +142,12 @@ class App(tk.Tk):
         tm.add_command(label="Browse...", command=self._browse_template_file)
 
         # Help
-        hm = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="Help", menu=hm)
+        hm = menu("Help")
         hm.add_command(label="About", command=self._show_about)
 
     def _build_toolbar(self):
         tb = ttk.Frame(self, relief=tk.FLAT)
-        tb.pack(side=tk.TOP, fill=tk.X, padx=4, pady=2)
+        tb.pack(side=tk.TOP, fill=tk.X, padx=12, pady=(0, 8))
 
         def btn(text, cmd):
             b = ttk.Button(tb, text=text, command=cmd, width=max(len(text) + 2, 7))
@@ -514,7 +553,9 @@ class App(tk.Tk):
     def _update_title(self):
         dirty = "*" if self.modified else ""
         fname = Path(self.current_file).name if self.current_file else "Untitled"
-        self.title(f"{dirty}{fname} — {APP_TITLE}")
+        title = f"{dirty}{fname} - {APP_TITLE}"
+        if self._standalone:
+            self._root_window.title(title)
 
     def _set_status(self, msg: str):
         self._status_var.set(f"  {msg}")
@@ -532,7 +573,11 @@ class App(tk.Tk):
 
     def _on_close(self):
         if self._confirm_discard():
-            self.destroy()
+            self._root_window.destroy()
+
+    @property
+    def menubar(self):
+        return self._menubar
 
     # ═══ EGM Upload ════════════════════════════════════════════
 
@@ -695,5 +740,5 @@ class App(tk.Tk):
 
 
 if __name__ == "__main__":
-    app = App()
-    app.mainloop()
+    app = App(standalone=True)
+    app.winfo_toplevel().mainloop()

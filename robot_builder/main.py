@@ -67,12 +67,18 @@ _URL_LABELS: dict = {
 }
 
 
-class RobotBuilderApp(tk.Tk):
-    def __init__(self):
-        super().__init__()
-        self.title("Aristocrat Robot Builder")
-        self.configure(bg=C_BG)
-        self.minsize(860, 700)
+class RobotBuilderApp(tk.Frame):
+    def __init__(self, master=None, standalone: bool = False):
+        if master is None:
+            master = tk.Tk()
+            standalone = True
+        super().__init__(master, bg=C_BG)
+        self._standalone = standalone
+        self._root_window = self.winfo_toplevel()
+        if self._standalone:
+            self._root_window.title("Aristocrat Robot Builder")
+            self._root_window.configure(bg=C_BG)
+            self._root_window.minsize(860, 700)
         self._stop_event   = threading.Event()
         self._build_active = False
         self._start_time   = 0.0
@@ -85,17 +91,20 @@ class RobotBuilderApp(tk.Tk):
         }
 
         self._build_ui()
-        self._center()
+        if self._standalone:
+            self.pack(fill=tk.BOTH, expand=True)
+            self._center()
 
     # ── UI ────────────────────────────────────────────────────────────────────
 
     def _build_ui(self):
-        self._build_header()
-        body = tk.Frame(self, bg=C_BG, padx=16, pady=12)
+        if self._standalone:
+            self._build_header()
+        body_pad = 16 if self._standalone else 12
+        body = tk.Frame(self, bg=C_BG, padx=body_pad, pady=12)
         body.pack(fill=tk.BOTH, expand=True)
         self._machine_section(body)
         self._config_section(body)
-        self._build_type_section(body)
         self._action_bar(body)
         self._log_section(body)
         self._status_bar()
@@ -121,33 +130,44 @@ class RobotBuilderApp(tk.Tk):
 
     def _machine_section(self, parent):
         f = self._card(parent, "Machine Settings")
-        g = tk.Frame(f, bg=C_SURFACE)
-        g.pack(fill=tk.X)
-        g.columnconfigure(1, weight=1)
+        row = tk.Frame(f, bg=C_SURFACE)
+        row.pack(fill=tk.X)
 
-        tk.Label(g, text="Machine IP:", width=16, anchor="w",
-                 font=("Segoe UI", 9), bg=C_SURFACE, fg=C_TEXT
-                 ).grid(row=0, column=0, sticky="w", pady=3)
-        ip_row = tk.Frame(g, bg=C_SURFACE)
-        ip_row.grid(row=0, column=1, sticky="w", pady=3)
+        ip_block = tk.Frame(row, bg=C_SURFACE)
+        ip_block.pack(side=tk.LEFT, fill=tk.X, padx=(0, 18))
+        tk.Label(ip_block, text="Machine IP",
+                 font=("Segoe UI", 9), bg=C_SURFACE, fg=C_TEXT, anchor="w"
+                 ).pack(fill=tk.X)
+        ip_row = tk.Frame(ip_block, bg=C_SURFACE)
+        ip_row.pack(fill=tk.X, pady=(2, 0))
         self._ip_var = tk.StringVar()
         ttk.Entry(ip_row, textvariable=self._ip_var, width=22).pack(side=tk.LEFT)
         tk.Label(ip_row, text="(mk7 / mk7)",
                  font=("Segoe UI", 8, "italic"), bg=C_SURFACE, fg=C_MUTED
                  ).pack(side=tk.LEFT, padx=8)
 
-        tk.Label(g, text="Remote Build Dir:", width=16, anchor="w",
-                 font=("Segoe UI", 9), bg=C_SURFACE, fg=C_TEXT
-                 ).grid(row=1, column=0, sticky="w", pady=3)
+        path_block = tk.Frame(row, bg=C_SURFACE)
+        path_block.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        tk.Label(path_block, text="Remote Build Dir",
+                 font=("Segoe UI", 9), bg=C_SURFACE, fg=C_TEXT, anchor="w"
+                 ).pack(fill=tk.X)
         self._builddir_var = tk.StringVar(value=_DEFAULT_BUILDDIR)
-        ttk.Entry(g, textvariable=self._builddir_var).grid(
-            row=1, column=1, sticky="ew", padx=4)
+        ttk.Entry(path_block, textvariable=self._builddir_var).pack(
+            fill=tk.X, pady=(2, 0))
 
     def _config_section(self, parent):
         f = self._card(parent, "Build Configuration")
 
-        # Target row
-        tgt_row = tk.Frame(f, bg=C_SURFACE)
+        layout = tk.Frame(f, bg=C_SURFACE)
+        layout.pack(fill=tk.X)
+
+        left = tk.Frame(layout, bg=C_SURFACE)
+        left.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 18))
+
+        right = tk.Frame(layout, bg=C_SURFACE)
+        right.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        tgt_row = tk.Frame(left, bg=C_SURFACE)
         tgt_row.pack(fill=tk.X, pady=(0, 8))
         tk.Label(tgt_row, text="Target:", font=("Segoe UI", 9), bg=C_SURFACE, fg=C_TEXT
                  ).pack(side=tk.LEFT)
@@ -155,8 +175,7 @@ class RobotBuilderApp(tk.Tk):
         ttk.Combobox(tgt_row, textvariable=self._target_var, values=TARGETS,
                      state="readonly", width=8).pack(side=tk.LEFT, padx=(4, 0))
 
-        # Build level radios
-        lvl_row = tk.Frame(f, bg=C_SURFACE)
+        lvl_row = tk.Frame(left, bg=C_SURFACE)
         lvl_row.pack(fill=tk.X, pady=(0, 10))
         tk.Label(lvl_row, text="Build Level:", font=("Segoe UI", 9), bg=C_SURFACE, fg=C_TEXT
                  ).pack(side=tk.LEFT)
@@ -165,15 +184,14 @@ class RobotBuilderApp(tk.Tk):
             ttk.Radiobutton(lvl_row, text=lvl, variable=self._level_var, value=lvl,
                             command=self._on_level_change).pack(side=tk.LEFT, padx=8)
 
-        # Separator + SVN URLs sub-section
-        tk.Frame(f, bg="#DDD9EF", height=1).pack(fill=tk.X, pady=(0, 8))
-        tk.Label(f, text="SVN Checkout URLs",
+        self._build_type_section(left)
+
+        tk.Label(right, text="SVN Checkout URLs",
                  font=("Segoe UI", 9, "bold"), bg=C_SURFACE, fg=C_TEXT,
                  anchor="w").pack(fill=tk.X, pady=(0, 4))
 
-        # One URL grid per level — only the active level is visible
         self._url_frames: dict = {}
-        container = tk.Frame(f, bg=C_SURFACE)
+        container = tk.Frame(right, bg=C_SURFACE)
         container.pack(fill=tk.X)
         self._url_container = container
 
@@ -199,28 +217,26 @@ class RobotBuilderApp(tk.Tk):
                 frm.pack_forget()
 
     def _build_type_section(self, parent):
-        f = self._card(parent, "Build Type")
         self._build_type_var = tk.StringVar(value="production")
 
-        prod_row = tk.Frame(f, bg=C_SURFACE)
-        prod_row.pack(fill=tk.X, pady=2)
-        ttk.Radiobutton(prod_row, text="Production",
-                        variable=self._build_type_var, value="production"
-                        ).pack(side=tk.LEFT)
-        tk.Label(prod_row,
-                 text="— includes --production  --nd_autoplay ",
-                 font=("Segoe UI", 8, "italic"), bg=C_SURFACE, fg=C_MUTED
-                 ).pack(side=tk.LEFT, padx=6)
+        tk.Label(parent, text="Build Type:", font=("Segoe UI", 9),
+                 bg=C_SURFACE, fg=C_TEXT).pack(anchor="w", pady=(0, 2))
 
-        ttk.Radiobutton(f, text="Debug",
+        type_row = tk.Frame(parent, bg=C_SURFACE)
+        type_row.pack(fill=tk.X)
+
+        ttk.Radiobutton(type_row, text="Production",
+                        variable=self._build_type_var, value="production"
+                        ).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Radiobutton(type_row, text="Debug",
                         variable=self._build_type_var, value="debug"
-                        ).pack(anchor="w", pady=2)
-        ttk.Radiobutton(f, text="Debug Asan",
+                        ).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Radiobutton(type_row, text="Debug Asan",
                         variable=self._build_type_var, value="debug_asan"
-                        ).pack(anchor="w", pady=2)
-        ttk.Radiobutton(f, text="Debug tcMalloc",
+                        ).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Radiobutton(type_row, text="Debug tcMalloc",
                         variable=self._build_type_var, value="debug_tcmalloc"
-                        ).pack(anchor="w", pady=2)
+                        ).pack(side=tk.LEFT)
 
     def _action_bar(self, parent):
         bar = tk.Frame(parent, bg=C_BG, pady=6)
@@ -260,7 +276,7 @@ class RobotBuilderApp(tk.Tk):
             insertbackground="#CDD6F4",
             state=tk.DISABLED,
             wrap=tk.NONE,
-            height=15,
+            height=20,
         )
         self._log.pack(fill=tk.BOTH, expand=True, pady=(4, 0))
         self._log.tag_configure("info",  foreground="#89B4FA")
@@ -283,9 +299,9 @@ class RobotBuilderApp(tk.Tk):
 
     def _center(self):
         self.update_idletasks()
-        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
-        w, h   = self.winfo_width(), self.winfo_height()
-        self.geometry(f"+{(sw - w) // 2}+{(sh - h) // 2}")
+        sw, sh = self._root_window.winfo_screenwidth(), self._root_window.winfo_screenheight()
+        w, h   = self._root_window.winfo_width(), self._root_window.winfo_height()
+        self._root_window.geometry(f"+{(sw - w) // 2}+{(sh - h) // 2}")
 
     def _log_append(self, text: str, tag: str = ""):
         self._log.configure(state=tk.NORMAL)
@@ -623,5 +639,5 @@ class RobotBuilderApp(tk.Tk):
 
 
 if __name__ == "__main__":
-    app = RobotBuilderApp()
-    app.mainloop()
+    app = RobotBuilderApp(standalone=True)
+    app.winfo_toplevel().mainloop()
