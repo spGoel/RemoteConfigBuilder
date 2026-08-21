@@ -23,11 +23,12 @@ ALL_METERS: List[str] = [
     'Bet', 'Last-Win', 'Hopper-Pay', 'Jackpot',
 ]
 
+# Keep enum-backed values in Robot/Types.h order, excluding sentinel entries.
 BUTTON_KEYS: List[str] = [
     'Play',
     'Play-Line-1', 'Play-Line-2', 'Play-Line-3', 'Play-Line-4', 'Play-Line-5',
     'Bet-1', 'Bet-2', 'Bet-3', 'Bet-4', 'Bet-5',
-    'Collect', 'Gamble', 'Take-Win',
+    'Collect', 'Take-Win', 'Gamble',
 ]
 
 DOOR_NAMES: List[str] = [
