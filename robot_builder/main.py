@@ -37,6 +37,19 @@ SHELL_BLOCK_MARKER = "# Robot Builder shell defaults"
 # ── Build options ─────────────────────────────────────────────────────────────
 TARGETS      = ["gli", "nsw", "qcom", "asp"]
 BUILD_LEVELS = ["3L", "5L", "AVL"]
+COMPONENT_OPTIONS = (
+    ("both", "Both"),
+    ("platform", "Platform only"),
+    ("game", "Game only"),
+)
+BUILD_FLAG_OPTIONS = (
+    ("clean", "clean"),
+    ("showmode", "show"),
+    ("production", "production"),
+    ("robot", "robot"),
+    ("asan", "asan"),
+    ("tcmalloc", "tcmalloc"),
+)
 
 # ── Bundled script (always sits next to this file) ────────────────────────────
 _BUNDLED_SCRIPT   = Path(__file__).parent / "Linux_BuildScript.sh"
@@ -164,40 +177,14 @@ class RobotBuilderApp(tk.Frame):
     def _config_section(self, parent):
         f = self._card(parent, "Build Configuration")
 
-        layout = tk.Frame(f, bg=C_SURFACE)
-        layout.pack(fill=tk.X)
+        self._build_options_section(f)
 
-        left = tk.Frame(layout, bg=C_SURFACE)
-        left.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 18))
-
-        right = tk.Frame(layout, bg=C_SURFACE)
-        right.pack(side=tk.LEFT, fill=tk.X, expand=True)
-
-        tgt_row = tk.Frame(left, bg=C_SURFACE)
-        tgt_row.pack(fill=tk.X, pady=(0, 8))
-        tk.Label(tgt_row, text="Target:", font=("Segoe UI", 9), bg=C_SURFACE, fg=C_TEXT
-                 ).pack(side=tk.LEFT)
-        self._target_var = tk.StringVar(value="gli")
-        ttk.Combobox(tgt_row, textvariable=self._target_var, values=TARGETS,
-                     state="readonly", width=8).pack(side=tk.LEFT, padx=(4, 0))
-
-        lvl_row = tk.Frame(left, bg=C_SURFACE)
-        lvl_row.pack(fill=tk.X, pady=(0, 10))
-        tk.Label(lvl_row, text="Build Level:", font=("Segoe UI", 9), bg=C_SURFACE, fg=C_TEXT
-                 ).pack(side=tk.LEFT)
-        self._level_var = tk.StringVar(value="3L")
-        for lvl in BUILD_LEVELS:
-            ttk.Radiobutton(lvl_row, text=lvl, variable=self._level_var, value=lvl,
-                            command=self._on_level_change).pack(side=tk.LEFT, padx=8)
-
-        self._build_type_section(left)
-
-        tk.Label(right, text="SVN Checkout URLs",
+        tk.Label(f, text="SVN Checkout URLs",
                  font=("Segoe UI", 9, "bold"), bg=C_SURFACE, fg=C_TEXT,
-                 anchor="w").pack(fill=tk.X, pady=(0, 4))
+                 anchor="w").pack(fill=tk.X, pady=(8, 4))
 
         self._url_frames: dict = {}
-        container = tk.Frame(right, bg=C_SURFACE)
+        container = tk.Frame(f, bg=C_SURFACE)
         container.pack(fill=tk.X)
         self._url_container = container
 
@@ -218,6 +205,80 @@ class RobotBuilderApp(tk.Frame):
                 ).grid(row=row_idx, column=2, sticky="e", padx=(4, 0), pady=2)
 
         self._url_frames[self._level_var.get()].pack(fill=tk.X)
+
+    def _build_options_section(self, parent):
+        panel = tk.Frame(parent, bg=C_SURFACE)
+        panel.pack(fill=tk.X)
+        panel.columnconfigure(0, weight=1)
+        panel.columnconfigure(1, weight=1)
+        panel.columnconfigure(2, weight=1)
+        panel.columnconfigure(3, weight=3)
+
+        self._target_var = tk.StringVar(value="GLI")
+        self._level_var = tk.StringVar(value="3L")
+        self._component_var = tk.StringVar(value="Both")
+        self._flag_vars = {
+            key: tk.BooleanVar(value=False)
+            for key, _ in BUILD_FLAG_OPTIONS
+        }
+
+        target_block, _target_combo = self._combo_block(
+            panel, "Target", self._target_var, [value.upper() for value in TARGETS]
+        )
+        target_block.grid(row=0, column=0, sticky="ew", padx=(0, 10))
+
+        level_block, level_combo = self._combo_block(
+            panel, "Build Type", self._level_var, BUILD_LEVELS
+        )
+        level_block.grid(row=0, column=1, sticky="ew", padx=(0, 10))
+        level_combo.bind("<<ComboboxSelected>>", lambda _event: self._on_level_change())
+
+        self._component_labels = {label: value for value, label in COMPONENT_OPTIONS}
+        component_block, _component_combo = self._combo_block(
+            panel,
+            "Components",
+            self._component_var,
+            list(self._component_labels.keys()),
+        )
+        component_block.grid(row=0, column=2, sticky="ew", padx=(0, 10))
+
+        flags_box = tk.LabelFrame(
+            panel,
+            text=" Build Flags ",
+            bg=C_SURFACE,
+            fg=C_ACCENT,
+            padx=10,
+            pady=6,
+            font=("Segoe UI", 9, "bold"),
+        )
+        flags_box.grid(row=0, column=3, sticky="nsew")
+        flags_box.columnconfigure(0, weight=1)
+        flags_box.columnconfigure(1, weight=1)
+        flags_box.columnconfigure(2, weight=1)
+        for idx, (key, label) in enumerate(BUILD_FLAG_OPTIONS):
+            ttk.Checkbutton(flags_box, text=label, variable=self._flag_vars[key]).grid(
+                row=idx // 3, column=idx % 3, sticky="w", padx=(0, 12), pady=3)
+
+    @staticmethod
+    def _combo_block(parent, label: str, variable: tk.StringVar, values: list) -> tuple:
+        block = tk.Frame(parent, bg=C_SURFACE)
+        tk.Label(
+            block,
+            text=label,
+            font=("Segoe UI", 9, "bold"),
+            bg=C_SURFACE,
+            fg=C_TEXT,
+            anchor="w",
+        ).pack(fill=tk.X, pady=(0, 3))
+        combo = ttk.Combobox(
+            block,
+            textvariable=variable,
+            values=values,
+            state="readonly",
+            width=16,
+        )
+        combo.pack(fill=tk.X)
+        return block, combo
 
     def _browse_svn_url(self, level: str, key: str, label: str):
         tortoise_proc = self._find_tortoise_proc()
@@ -301,28 +362,6 @@ class RobotBuilderApp(tk.Frame):
                 frm.pack(fill=tk.X)
             else:
                 frm.pack_forget()
-
-    def _build_type_section(self, parent):
-        self._build_type_var = tk.StringVar(value="production")
-
-        tk.Label(parent, text="Build Type:", font=("Segoe UI", 9),
-                 bg=C_SURFACE, fg=C_TEXT).pack(anchor="w", pady=(0, 2))
-
-        type_row = tk.Frame(parent, bg=C_SURFACE)
-        type_row.pack(fill=tk.X)
-
-        ttk.Radiobutton(type_row, text="Production",
-                        variable=self._build_type_var, value="production"
-                        ).pack(side=tk.LEFT, padx=(0, 8))
-        ttk.Radiobutton(type_row, text="Debug",
-                        variable=self._build_type_var, value="debug"
-                        ).pack(side=tk.LEFT, padx=(0, 8))
-        ttk.Radiobutton(type_row, text="Debug Asan",
-                        variable=self._build_type_var, value="debug_asan"
-                        ).pack(side=tk.LEFT, padx=(0, 8))
-        ttk.Radiobutton(type_row, text="Debug tcMalloc",
-                        variable=self._build_type_var, value="debug_tcmalloc"
-                        ).pack(side=tk.LEFT)
 
     def _action_bar(self, parent):
         bar = tk.Frame(parent, bg=C_BG, pady=6)
@@ -424,14 +463,25 @@ class RobotBuilderApp(tk.Frame):
     # ── Build args & script patching ──────────────────────────────────────────
 
     def _collected_args(self) -> list:
-        args = [self._target_var.get(), self._level_var.get()]
-        build_type = self._build_type_var.get()
-        if build_type == "production":
-            args += ["--production", "--robot"]
-        elif build_type == "debug_asan":
-            args.append("--asan")
-        elif build_type == "debug_tcmalloc":
-            args.append("--tcmalloc")
+        args = [self._target_var.get().lower(), self._level_var.get()]
+
+        component = self._component_labels.get(self._component_var.get(), "both")
+        if component in ("both", "platform"):
+            args.append("--platform")
+        if component in ("both", "game"):
+            args.append("--game")
+
+        flag_args = {
+            "clean": "--clean",
+            "showmode": "--showmode",
+            "production": "--production",
+            "robot": "--robot",
+            "asan": "--asan",
+            "tcmalloc": "--tcmalloc",
+        }
+        for key, flag in flag_args.items():
+            if self._flag_vars[key].get():
+                args.append(flag)
         return args
 
     def _patched_script_bytes(self) -> bytes:

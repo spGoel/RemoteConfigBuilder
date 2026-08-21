@@ -40,7 +40,7 @@ echo_build_type_missing()
 if [[ "${1:-}" == "--help" ]]; then
   echo ""
   echo ""
-  echo "Usage: $0 <target> <3L|5L|AVL> [--platform] [--game] [--clean] [--showmode] [--production] [--robot] [-asan] [-tcmalloc]"
+  echo "Usage: $0 <target> <3L|5L|AVL> [--platform] [--game] [--clean] [--showmode] [--production] [--robot] [--asan] [--tcmalloc]"
   echo_target_missing
   echo_build_type_missing
   echo "Optional Flags:"
@@ -50,8 +50,8 @@ if [[ "${1:-}" == "--help" ]]; then
   echo "  --showmode      Enable show mode"
   echo "  --production    Build production version"
   echo "  --robot         Enable autoplay robot feature"
-  echo "  -asan           Enable debug ASAN build option"
-  echo "  -tcmalloc       Enable debug tcMalloc build option"
+  echo "  --asan          Enable debug ASAN build option"
+  echo "  --tcmalloc      Enable debug tcMalloc build option"
   echo ""
   echo "5L Robot Build:"
   echo "  5L game builds also checkout Configurable Robot source into ./robot,"
