@@ -4,12 +4,14 @@ run it inside a named GNU Screen session, stream live output back here.
 """
 import io
 import posixpath
+import subprocess
+import tempfile
 import threading
 import time
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
 from pathlib import Path
-from typing import Tuple
+from typing import Optional, Tuple
 
 # ── Palette ───────────────────────────────────────────────────────────────────
 C_ACCENT   = "#5B3EA6"
@@ -39,6 +41,10 @@ BUILD_LEVELS = ["3L", "5L", "AVL"]
 # ── Bundled script (always sits next to this file) ────────────────────────────
 _BUNDLED_SCRIPT   = Path(__file__).parent / "Linux_BuildScript.sh"
 _DEFAULT_BUILDDIR = "/home/mk7/development/robot_builds"
+_TORTOISE_PROC_CANDIDATES = (
+    Path(r"C:\Program Files\TortoiseSVN\bin\TortoiseProc.exe"),
+    Path(r"C:\Program Files (x86)\TortoiseSVN\bin\TortoiseProc.exe"),
+)
 
 # ── Default SVN URLs per build level (sourced from Linux_BuildScript.sh) ──────
 _DEFAULT_URLS: dict = {
@@ -205,8 +211,88 @@ class RobotBuilderApp(tk.Frame):
                          ).grid(row=row_idx, column=0, sticky="w", pady=2)
                 ttk.Entry(frm, textvariable=self._url_vars[level][key]
                           ).grid(row=row_idx, column=1, sticky="ew", padx=4)
+                ttk.Button(
+                    frm,
+                    text="Browse...",
+                    command=lambda lvl=level, k=key, lbl=label: self._browse_svn_url(lvl, k, lbl),
+                ).grid(row=row_idx, column=2, sticky="e", padx=(4, 0), pady=2)
 
         self._url_frames[self._level_var.get()].pack(fill=tk.X)
+
+    def _browse_svn_url(self, level: str, key: str, label: str):
+        tortoise_proc = self._find_tortoise_proc()
+        url_var = self._url_vars[level][key]
+        url = url_var.get().strip()
+
+        if tortoise_proc is None:
+            messagebox.showerror(
+                "TortoiseSVN Not Found",
+                "TortoiseSVN Repository Browser could not be opened because "
+                "TortoiseProc.exe was not found.",
+                parent=self,
+            )
+            return
+
+        if not url:
+            messagebox.showwarning(
+                "Missing SVN URL",
+                f"Enter a {label} URL before opening the Repository Browser.",
+                parent=self,
+            )
+            return
+
+        try:
+            output_path = self._new_repo_browser_output_path()
+            proc = subprocess.Popen([
+                str(tortoise_proc),
+                "/command:repobrowser",
+                f"/path:{url}",
+                f"/outfile:{output_path}",
+            ])
+            threading.Thread(
+                target=self._repo_browser_result_worker,
+                args=(proc, output_path, url_var),
+                daemon=True,
+            ).start()
+        except Exception as exc:
+            messagebox.showerror(
+                "Repository Browser",
+                f"Failed to open TortoiseSVN Repository Browser:\n{exc}",
+                parent=self,
+            )
+
+    @staticmethod
+    def _find_tortoise_proc() -> Optional[Path]:
+        for candidate in _TORTOISE_PROC_CANDIDATES:
+            if candidate.exists():
+                return candidate
+        return None
+
+    @staticmethod
+    def _new_repo_browser_output_path() -> Path:
+        handle = tempfile.NamedTemporaryFile(
+            prefix="robot_builder_repo_",
+            suffix=".txt",
+            delete=False,
+        )
+        path = Path(handle.name)
+        handle.close()
+        return path
+
+    def _repo_browser_result_worker(self, proc, output_path: Path, url_var: tk.StringVar):
+        try:
+            proc.wait()
+            if not output_path.exists():
+                return
+            lines = output_path.read_text(encoding="utf-8", errors="replace").splitlines()
+            selected_url = lines[0].strip() if lines else ""
+            if selected_url:
+                self.after(0, url_var.set, selected_url)
+        finally:
+            try:
+                output_path.unlink(missing_ok=True)
+            except Exception:
+                pass
 
     def _on_level_change(self):
         active = self._level_var.get()
