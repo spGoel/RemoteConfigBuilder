@@ -39,11 +39,11 @@ TOOLS = [
     },
     {
         "key": "memory",
-        "title": "Memory Monitor",
-        "subtitle": "Live machine metrics during robot runs",
-        "script": None,
-        "class_name": None,
-        "available": False,
+        "title": "Memory Profiler",
+        "subtitle": "Live and historical Robot meter charts",
+        "script": BASE_DIR / "memory_profiling" / "main.py",
+        "class_name": "MemoryProfilingTab",
+        "available": True,
     },
 ]
 
@@ -230,6 +230,10 @@ class LauncherApp(tk.Tk):
             ):
                 return
             builder_app._stop()
+
+        memory_app = self._tool_apps.get("memory")
+        if memory_app is not None:
+            memory_app.shutdown()
 
         self.destroy()
 

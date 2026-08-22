@@ -2,4 +2,5 @@ RemoteConfigBuilder.code-workspace
 Robot
 robot_builder/__pycache__/
 robot_config_builder/__pycache__/
+memory_profiling/__pycache__/
 
