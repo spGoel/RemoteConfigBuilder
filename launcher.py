@@ -45,6 +45,22 @@ TOOLS = [
         "class_name": "MemoryProfilingTab",
         "available": True,
     },
+    {
+        "key": "asan",
+        "title": "ASAN Report",
+        "subtitle": "Browse and inspect AddressSanitizer diagnostics",
+        "script": BASE_DIR / "asan_report" / "main.py",
+        "class_name": "AsanReportTab",
+        "available": True,
+    },
+    {
+        "key": "tcmalloc",
+        "title": "tcMalloc Report",
+        "subtitle": "Browse heap snapshots and generate pprof PDF reports",
+        "script": BASE_DIR / "tcmalloc_report" / "main.py",
+        "class_name": "TcMallocReportTab",
+        "available": True,
+    },
 ]
 
 
