@@ -141,8 +141,8 @@ while [[ $# -gt 0 ]]; do
         --showmode)   enable_showmode=true ;;
         --production) is_production=true ;;
         --robot)      autoplay_robot=true ;;
-        --asan|-asan)           enable_asan=true ;;
-        --tcmalloc|-tcmalloc)   enable_tcmalloc=true ;;
+        --asan)       enable_asan=true ;;
+        --tcmalloc)   enable_tcmalloc=true ;;
         *)
             echo "Unknown flag: $1" >&2
             echo "Run '$0 --help' for usage." >&2
@@ -325,7 +325,11 @@ build_game_5L() {
     cd "$build_dir"
     log "pwd: $PWD"
     log "game path: $m_gamePath"
-    if $is_production; then
+    if $enable_asan; then 
+        ./configure_game_build --make-args "install-debug" --game-src-dir="$m_gamePath" --cmake-options "PROFILE_ASAN:BOOL=ON" --cmake-options-force
+    elif $enable_tcmalloc; then
+        ./configure_game_build --make-args "install-debug" --game-src-dir="$m_gamePath" --cmake-options "PROFILE_TCMALLOC:BOOL=ON" --cmake-options-force
+    elif $is_production; then
         ./configure_game_build --make-args "install-release" --game-src-dir="$m_gamePath" --cmake-options-force
     else
         ./configure_game_build --make-args "install-debug" --game-src-dir="$m_gamePath" --cmake-options-force
