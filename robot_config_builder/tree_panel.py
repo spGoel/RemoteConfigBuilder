@@ -140,8 +140,21 @@ class TreePanel(ttk.Frame):
 
     def _parent_node(self, node: RobotNode) -> Optional[RobotNode]:
         for n in self.node_map.values():
-            if node in n.children:
+            # RobotNode is a dataclass, so ``in``/``list.index`` use value
+            # equality.  Fresh default nodes and duplicated subtrees often
+            # compare equal even though they are different tree rows.  Tree
+            # mutations must always follow the exact object represented by
+            # the Treeview iid.
+            if any(child is node for child in n.children):
                 return n
+        return None
+
+    @staticmethod
+    def _child_index(parent: RobotNode, node: RobotNode) -> Optional[int]:
+        """Return node's identity-based index, or None if it is not a child."""
+        for index, child in enumerate(parent.children):
+            if child is node:
+                return index
         return None
 
     # ── Selection ───────────────────────────────────────────────
@@ -221,8 +234,10 @@ class TreePanel(ttk.Frame):
         parent = self._parent_node(node)
         if not parent:
             return
+        idx = self._child_index(parent, node)
+        if idx is None:
+            return
         self._push_undo()
-        idx = parent.children.index(node)
         new_node = RobotNode.new(event_type)
         parent.children.insert(idx + 1, new_node)
         self.refresh_tree(select_node=new_node)
@@ -235,9 +250,11 @@ class TreePanel(ttk.Frame):
         parent = self._parent_node(node)
         if not parent:
             return
+        idx = self._child_index(parent, node)
+        if idx is None:
+            return
         self._push_undo()
         new_node = copy.deepcopy(node)
-        idx = parent.children.index(node)
         parent.children.insert(idx + 1, new_node)
         self.refresh_tree(select_node=new_node)
         self.on_tree_changed()
@@ -255,8 +272,11 @@ class TreePanel(ttk.Frame):
         if not messagebox.askyesno("Delete Node",
                                     f"Delete '{node.node_type}' and all its children?"):
             return
+        idx = self._child_index(parent, node)
+        if idx is None:
+            return
         self._push_undo()
-        parent.children.remove(node)
+        parent.children.pop(idx)
         self.refresh_tree()
         self.on_tree_changed()
 
@@ -267,7 +287,9 @@ class TreePanel(ttk.Frame):
         parent = self._parent_node(node)
         if not parent:
             return
-        idx = parent.children.index(node)
+        idx = self._child_index(parent, node)
+        if idx is None:
+            return
         new_idx = idx + direction
         if 0 <= new_idx < len(parent.children):
             self._push_undo()
@@ -294,14 +316,18 @@ class TreePanel(ttk.Frame):
     # ── Drag and drop ───────────────────────────────────────────
 
     def _drag_start(self, event):
+        # A release outside the widget may leave state from the previous drag.
+        # Always begin from a clean state so it cannot affect the next drop.
+        self._clear_drop_indicator()
+        self._drag_src_iid = None
+        self._drag_src_node = None
+
         iid = self.tree.identify_row(event.y)
         if not iid:
-            self._drag_src_iid = None
             return
         node = self.node_map.get(iid)
         # Root cannot be dragged
         if node is None or node is self.root_node:
-            self._drag_src_iid = None
             return
         self._drag_src_iid = iid
         self._drag_src_node = node
@@ -334,7 +360,10 @@ class TreePanel(ttk.Frame):
         rel = (event.y - y) / max(h, 1)   # 0.0 (top) → 1.0 (bottom)
 
         is_container = target_node.node_type in CONTAINER_TYPES
-        if is_container:
+        if target_node is self.root_node:
+            # Root has no siblings, so its entire row is an "into" target.
+            pos = "into"
+        elif is_container:
             if rel < 0.30:
                 pos = "before"
             elif rel > 0.70:
@@ -382,6 +411,10 @@ class TreePanel(ttk.Frame):
         self._drop_line.place_forget()
 
     def _drag_release(self, event):
+        # Resolve the release coordinates themselves.  On a fast movement the
+        # last B1-Motion event can still refer to the previous row.
+        self._drag_motion(event)
+
         src_iid  = self._drag_src_iid
         src_node = self._drag_src_node
         tgt_iid  = self._drop_target_iid
@@ -410,26 +443,45 @@ class TreePanel(ttk.Frame):
         if not src_parent:
             return
 
+        src_idx = self._child_index(src_parent, src_node)
+        if src_idx is None:
+            return
+
         if pos == "into":
             if tgt_node.node_type not in CONTAINER_TYPES:
                 return
             if self._is_ancestor(src_node, tgt_node):
                 return
             self._push_undo()
-            src_parent.children.remove(src_node)
+            src_parent.children.pop(src_idx)
             tgt_node.children.append(src_node)
 
         else:  # "before" or "after"
+            if pos not in ("before", "after"):
+                return
             tgt_parent = self._parent_node(tgt_node)
             if tgt_parent is None:
                 return   # target is root — can't insert relative to root
             if self._is_ancestor(src_node, tgt_node):
                 return
-            self._push_undo()
-            src_parent.children.remove(src_node)
-            # Recompute index after removal (src_parent may equal tgt_parent)
-            tgt_idx = tgt_parent.children.index(tgt_node)
+            tgt_idx = self._child_index(tgt_parent, tgt_node)
+            if tgt_idx is None:
+                return
+
+            # Resolve both exact rows before removing anything.  When source
+            # and target share a parent, account for the target shifting left
+            # after the source is popped.
             insert_idx = tgt_idx if pos == "before" else tgt_idx + 1
+            if src_parent is tgt_parent and src_idx < insert_idx:
+                insert_idx -= 1
+
+            # Dropping immediately before/after the current position is a
+            # no-op; avoid creating an unnecessary undo snapshot.
+            if src_parent is tgt_parent and insert_idx == src_idx:
+                return
+
+            self._push_undo()
+            src_parent.children.pop(src_idx)
             tgt_parent.children.insert(insert_idx, src_node)
 
         self.refresh_tree(select_node=src_node)

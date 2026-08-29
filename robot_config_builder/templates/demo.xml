@@ -58,4 +58,3 @@
 	<event type="Clear-Jackpot"/>
 	<output filename="robotlogs/eventsfile.txt" append="False"/>
 </event>
-</event>
