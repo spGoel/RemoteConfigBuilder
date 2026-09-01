@@ -1,4 +1,4 @@
-"""Standalone live and historical charts for Robot meter CSV files."""
+"""Standalone live and historical charts for Robot meter streams."""
 
 from __future__ import annotations
 
@@ -7,7 +7,9 @@ import hashlib
 import json
 import math
 import os
+import queue
 import shlex
+import socket
 import sqlite3
 import tempfile
 import threading
@@ -171,6 +173,109 @@ def download_remote_meter_csv(
         client.close()
 
 
+class LiveMeterServer:
+    """Receive Robot's MetersCSV stream without writing an intermediate file."""
+
+    def __init__(self, host: str, port: int, events: queue.Queue):
+        self.host = host
+        self.port = port
+        self.events = events
+        self._stopping = threading.Event()
+        self._listener = None
+        self._client = None
+        self._thread = None
+
+    def start(self):
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        self._stopping.set()
+        for stream in (self._client, self._listener):
+            if stream is not None:
+                try:
+                    stream.close()
+                except OSError:
+                    pass
+
+    def _run(self):
+        try:
+            listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self._listener = listener
+            listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            listener.bind((self.host, self.port))
+            listener.listen(1)
+            listener.settimeout(0.5)
+            self.port = listener.getsockname()[1]
+            self.events.put(("status", f"Listening on {self.host}:{self.port}"))
+
+            while not self._stopping.is_set():
+                try:
+                    client, address = listener.accept()
+                except socket.timeout:
+                    continue
+                except OSError:
+                    break
+                self._client = client
+                self.events.put(("status", f"Robot connected from {address[0]}"))
+                try:
+                    self._receive(client)
+                finally:
+                    try:
+                        client.close()
+                    except OSError:
+                        pass
+                    self._client = None
+                if not self._stopping.is_set():
+                    self.events.put(("status", "Robot disconnected; listening again"))
+        except OSError as exc:
+            if not self._stopping.is_set():
+                self.events.put(("error", str(exc)))
+        finally:
+            if self._listener is not None:
+                try:
+                    self._listener.close()
+                except OSError:
+                    pass
+                self._listener = None
+
+    def _receive(self, client: socket.socket):
+        client.settimeout(0.5)
+        buffer = ""
+        header = None
+        while not self._stopping.is_set():
+            try:
+                data = client.recv(65536)
+            except socket.timeout:
+                continue
+            except OSError:
+                return
+            if not data:
+                return
+            buffer += data.decode("utf-8-sig", errors="replace")
+            while "\n" in buffer:
+                line, buffer = buffer.split("\n", 1)
+                line = line.rstrip("\r")
+                if not line:
+                    continue
+                try:
+                    fields = next(csv.reader([line]))
+                except csv.Error as exc:
+                    self.events.put(("error", f"Invalid meter row: {exc}"))
+                    continue
+                if header is None:
+                    header = [field.strip() for field in fields]
+                    if "Time" not in header or not any(
+                        meter in header for meter in ALL_METERS
+                    ):
+                        self.events.put(("error", "Robot stream has an invalid meter header"))
+                        return
+                elif len(fields) != len(header):
+                    self.events.put(("error", "Robot stream row does not match its header"))
+                else:
+                    self.events.put(("row", dict(zip(header, fields))))
+
+
 class MeterHistoryStore:
     """Persistent SQLite history for one or more Robot meter CSV sources."""
 
@@ -255,6 +360,46 @@ class MeterHistoryStore:
         self._connection.commit()
         return self._connection.total_changes - before
 
+    def insert_sample(self, source_path: Path, raw_row: Dict[str, str]) -> int:
+        """Persist one row received from Robot's live TCP output."""
+        row = {
+            key.strip(): (value.strip() if value is not None else "")
+            for key, value in raw_row.items()
+            if key is not None
+        }
+        sampled_at = _parse_robot_time(row.get("Time", "")) or time.time()
+        meter_names = [meter for meter in ALL_METERS if row.get(meter, "")]
+        fingerprint = "\x1f".join(
+            [row.get("Time", ""), row.get("Info", "")]
+            + [row.get(meter, "") for meter in meter_names]
+        )
+        sample_key = hashlib.sha1(
+            fingerprint.encode("utf-8", errors="replace")
+        ).hexdigest()
+        inserts = []
+        for meter in meter_names:
+            try:
+                value = float(row[meter])
+            except ValueError:
+                continue
+            if math.isfinite(value):
+                inserts.append((
+                    str(Path(source_path).resolve()), sample_key,
+                    sampled_at, meter, value,
+                ))
+
+        before = self._connection.total_changes
+        self._connection.executemany(
+            """
+            INSERT OR IGNORE INTO meter_samples
+                (source, sample_key, sampled_at, meter, value)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            inserts,
+        )
+        self._connection.commit()
+        return self._connection.total_changes - before
+
     def load_series(
         self,
         source_path: Path,
@@ -320,6 +465,10 @@ class MemoryProfilingTab(tk.Frame):
         self._last_remote_signature: Optional[Tuple[int, int]] = None
         self._active_remote_cache: Optional[Path] = None
         self._resolved_remote_path = ""
+        self._tcp_server: Optional[LiveMeterServer] = None
+        self._tcp_events = None
+        self._tcp_job = None
+        self._active_tcp_source: Optional[Path] = None
         self._last_file_signature = None
         self._live_view = True
         self._view_end: Optional[float] = None
@@ -331,7 +480,7 @@ class MemoryProfilingTab(tk.Frame):
 
         profiler_settings = _load_settings()
         source_mode = profiler_settings.get("source_mode", "Local file")
-        if source_mode not in {"Local file", "Remote EGM"}:
+        if source_mode not in {"Local file", "Remote EGM", "Live TCP"}:
             source_mode = "Local file"
         self._source_mode_var = tk.StringVar(value=source_mode)
         self._csv_path_var = tk.StringVar(
@@ -341,13 +490,20 @@ class MemoryProfilingTab(tk.Frame):
         self._remote_path_var = tk.StringVar(
             value=profiler_settings.get("remote_path", "") or "/home/mk7/development"
         )
+        self._listen_ip_var = tk.StringVar(
+            value=profiler_settings.get("listen_ip", "0.0.0.0")
+        )
+        self._listen_port_var = tk.StringVar(
+            value=profiler_settings.get("listen_port", "2207")
+        )
         self._interval_var = tk.StringVar(value=profiler_settings.get("interval", "5"))
         self._range_var = tk.StringVar(value="1 hour")
         self._status_var = tk.StringVar(value="Waiting to start")
         self._timeline_var = tk.DoubleVar(value=0.0)
         for variable in (
             self._source_mode_var, self._csv_path_var, self._ip_var,
-            self._remote_path_var, self._interval_var,
+            self._remote_path_var, self._listen_ip_var, self._listen_port_var,
+            self._interval_var,
         ):
             variable.trace_add("write", self._save_settings)
         self._build_ui()
@@ -363,7 +519,8 @@ class MemoryProfilingTab(tk.Frame):
         )
         source_box = ttk.Combobox(
             controls, textvariable=self._source_mode_var,
-            values=["Local file", "Remote EGM"], state="readonly", width=12,
+            values=["Local file", "Remote EGM", "Live TCP"],
+            state="readonly", width=12,
         )
         source_box.grid(row=0, column=1, sticky="w", padx=(5, 12))
         source_box.bind("<<ComboboxSelected>>", self._source_changed)
@@ -393,6 +550,20 @@ class MemoryProfilingTab(tk.Frame):
             self._remote_fields, textvariable=self._remote_path_var, width=55,
         ).pack(side=tk.LEFT, padx=(4, 0), fill=tk.X, expand=True)
 
+        self._tcp_fields = tk.Frame(controls, bg=C_SURFACE)
+        tk.Label(
+            self._tcp_fields, text="Listen IP:", bg=C_SURFACE, fg=C_TEXT,
+        ).pack(side=tk.LEFT)
+        ttk.Entry(
+            self._tcp_fields, textvariable=self._listen_ip_var, width=17,
+        ).pack(side=tk.LEFT, padx=(4, 10))
+        tk.Label(
+            self._tcp_fields, text="Port:", bg=C_SURFACE, fg=C_TEXT,
+        ).pack(side=tk.LEFT)
+        ttk.Entry(
+            self._tcp_fields, textvariable=self._listen_port_var, width=7,
+        ).pack(side=tk.LEFT, padx=(4, 0))
+
         tk.Label(controls, text="Poll (sec):", bg=C_SURFACE, fg=C_TEXT).grid(
             row=1, column=0, sticky="w", pady=(8, 0)
         )
@@ -405,9 +576,10 @@ class MemoryProfilingTab(tk.Frame):
         ttk.Button(controls, text="Refresh", command=self._force_refresh).grid(
             row=1, column=3, sticky="w", padx=(4, 0), pady=(8, 0)
         )
+        self._source_hint_var = tk.StringVar()
         tk.Label(
             controls,
-            text="Remote login uses the configured EGM account (mk7/mk7)",
+            textvariable=self._source_hint_var,
             bg=C_SURFACE, fg=C_MUTED,
         ).grid(row=1, column=4, columnspan=3, sticky="w", padx=(12, 0), pady=(8, 0))
         controls.grid_columnconfigure(4, weight=1)
@@ -530,6 +702,8 @@ class MemoryProfilingTab(tk.Frame):
                     "local_csv": self._csv_path_var.get(),
                     "ip": self._ip_var.get(),
                     "remote_path": self._remote_path_var.get(),
+                    "listen_ip": self._listen_ip_var.get(),
+                    "listen_port": self._listen_port_var.get(),
                     "interval": self._interval_var.get(),
                 }, indent=2),
                 encoding="utf-8",
@@ -538,27 +712,43 @@ class MemoryProfilingTab(tk.Frame):
             pass
 
     def _source_changed(self, _event=None):
-        remote = self._source_mode_var.get() == "Remote EGM"
-        if remote:
+        mode = self._source_mode_var.get()
+        self._stop_tcp_server()
+        if mode == "Remote EGM":
             self._local_fields.grid_remove()
+            self._tcp_fields.grid_remove()
             self._remote_fields.grid(row=0, column=2, columnspan=5, sticky="ew")
+            self._source_hint_var.set(
+                "Remote login uses the configured EGM account (mk7/mk7)"
+            )
+        elif mode == "Live TCP":
+            self._local_fields.grid_remove()
+            self._remote_fields.grid_remove()
+            self._tcp_fields.grid(row=0, column=2, columnspan=5, sticky="ew")
+            self._source_hint_var.set("Configure Robot output to this PC and port")
         else:
             self._remote_fields.grid_remove()
+            self._tcp_fields.grid_remove()
             self._local_fields.grid(row=0, column=2, columnspan=5, sticky="ew")
+            self._source_hint_var.set("")
         self._last_file_signature = None
         self._last_remote_signature = None
         self._remote_request_id += 1
         self._remote_fetch_active = False
         self._active_remote_cache = None
         self._resolved_remote_path = ""
+        self._active_tcp_source = None
         if hasattr(self, "_chart"):
             self._go_live()
             if self._running:
                 self._poll_once()
 
     def _active_source_path(self) -> Optional[Path]:
-        if self._source_mode_var.get() == "Remote EGM":
+        mode = self._source_mode_var.get()
+        if mode == "Remote EGM":
             return self._active_remote_cache
+        if mode == "Live TCP":
+            return self._active_tcp_source
         value = self._csv_path_var.get().strip()
         return Path(value) if value else None
 
@@ -575,6 +765,7 @@ class MemoryProfilingTab(tk.Frame):
     def stop(self):
         self._running = False
         self._start_button.configure(text="Start")
+        self._stop_tcp_server()
         if self._poll_job is not None:
             self.after_cancel(self._poll_job)
             self._poll_job = None
@@ -584,8 +775,12 @@ class MemoryProfilingTab(tk.Frame):
         if self._poll_job is not None:
             self.after_cancel(self._poll_job)
             self._poll_job = None
-        if self._source_mode_var.get() == "Remote EGM":
+        mode = self._source_mode_var.get()
+        if mode == "Remote EGM":
             self._poll_remote()
+            return
+        if mode == "Live TCP":
+            self._start_tcp_server()
             return
 
         value = self._csv_path_var.get().strip()
@@ -619,6 +814,87 @@ class MemoryProfilingTab(tk.Frame):
             self._status_var.set(f"Waiting for CSV: {csv_path}")
         except (OSError, ValueError, sqlite3.Error) as exc:
             self._status_var.set(f"Could not read meters: {exc}")
+
+    def _start_tcp_server(self):
+        if self._tcp_server is not None:
+            return
+        host = self._listen_ip_var.get().strip() or "0.0.0.0"
+        try:
+            port = int(self._listen_port_var.get())
+            if not 1 <= port <= 65535:
+                raise ValueError
+        except ValueError:
+            self._status_var.set("TCP port must be between 1 and 65535")
+            return
+
+        source_name = f"tcp_{host.replace(':', '_')}_{port}.stream"
+        self._active_tcp_source = DATA_DIR / source_name
+        self._tcp_events = queue.Queue()
+        self._tcp_server = LiveMeterServer(host, port, self._tcp_events)
+        self._status_var.set(f"Starting TCP listener on {host}:{port}…")
+        self._tcp_server.start()
+        self._drain_tcp_events()
+
+    def _stop_tcp_server(self):
+        if self._tcp_job is not None:
+            try:
+                self.after_cancel(self._tcp_job)
+            except tk.TclError:
+                pass
+            self._tcp_job = None
+        if self._tcp_server is not None:
+            self._tcp_server.stop()
+            self._tcp_server = None
+        self._tcp_events = None
+
+    def _drain_tcp_events(self):
+        self._tcp_job = None
+        events = self._tcp_events
+        if events is None:
+            return
+
+        imported = 0
+        received_row = False
+        while True:
+            try:
+                kind, payload = events.get_nowait()
+            except queue.Empty:
+                break
+            if kind == "status":
+                self._status_var.set(payload)
+            elif kind == "error":
+                self._status_var.set(f"TCP error: {payload}")
+            elif kind == "row" and self._active_tcp_source is not None:
+                try:
+                    imported += self._history.insert_sample(
+                        self._active_tcp_source, payload,
+                    )
+                except sqlite3.Error as exc:
+                    self._status_var.set(f"Could not save TCP meters: {exc}")
+                    continue
+                for meter in ALL_METERS:
+                    raw_value = payload.get(meter, "").strip()
+                    if not raw_value:
+                        continue
+                    try:
+                        value = float(raw_value)
+                    except ValueError:
+                        value = raw_value
+                    self._current_values[meter] = value
+                received_row = True
+
+        if received_row:
+            self._update_value_labels()
+            self._status_var.set(
+                f"Live TCP • {datetime.now():%H:%M:%S} • "
+                f"{imported} new values saved"
+            )
+            self._update_timeline()
+            if self._live_view:
+                self._draw_chart()
+
+        if self._running and self._source_mode_var.get() == "Live TCP":
+            self._tcp_job = self.after(100, self._drain_tcp_events)
 
     def _poll_remote(self):
         if self._remote_fetch_active:
@@ -729,6 +1005,12 @@ class MemoryProfilingTab(tk.Frame):
             self._poll_job = self.after(delay_ms, self._poll_once)
 
     def _force_refresh(self):
+        if self._source_mode_var.get() == "Live TCP":
+            if self._running:
+                self._stop_tcp_server()
+                self._start_tcp_server()
+            self._draw_chart()
+            return
         self._last_file_signature = None
         self._last_remote_signature = None
         self._poll_once()
@@ -840,9 +1122,14 @@ class MemoryProfilingTab(tk.Frame):
 
         path = self._active_source_path()
         if path is None:
+            source_message = (
+                "Start the TCP listener and connect Robot"
+                if self._source_mode_var.get() == "Live TCP"
+                else "Connect to an EGM or select a local meter CSV"
+            )
             canvas.create_text(
                 width / 2, height / 2,
-                text="Connect to an EGM or select a local meter CSV",
+                text=source_message,
                 fill=C_MUTED, font=("Segoe UI", 12),
             )
             return
@@ -963,6 +1250,7 @@ class MemoryProfilingTab(tk.Frame):
         if self._closed:
             return
         self._closed = True
+        self._stop_tcp_server()
         if self._poll_job is not None:
             try:
                 self.after_cancel(self._poll_job)
