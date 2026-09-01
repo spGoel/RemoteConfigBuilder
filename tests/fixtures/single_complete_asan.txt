@@ -1,0 +1,7 @@
+==42==ERROR: LeakSanitizer: detected memory leaks
+
+Direct leak of 64 byte(s) in 2 object(s) allocated from:
+    #0 0x1000 in malloc asan_malloc_linux.cpp:69
+    #1 0x1001 in CreateWidget project/widget.cpp:42
+
+SUMMARY: AddressSanitizer: 64 byte(s) leaked in 2 allocation(s).

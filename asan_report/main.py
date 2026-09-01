@@ -1,16 +1,17 @@
-"""Standalone ASAN report browser for local files and remote EGMs."""
+"""Local ASAN report viewer with deterministic offline analysis."""
 
 from __future__ import annotations
 
-import json
-import re
-import shlex
+import shutil
 import threading
 import tkinter as tk
-from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, ttk
-from typing import Dict, List
+
+try:
+    from offline_analyzer import analyze_file, format_analysis
+except ImportError:  # Package-style import, useful for tests and reuse.
+    from .offline_analyzer import analyze_file, format_analysis
 
 
 C_BG = "#F3F0FA"
@@ -18,114 +19,20 @@ C_SURFACE = "#FFFFFF"
 C_TEXT = "#1A1820"
 C_MUTED = "#5C5870"
 C_ACCENT = "#5B3EA6"
-C_ERROR = "#B71C1C"
-C_WARN = "#B26A00"
 
-DATA_DIR = Path.home() / ".asan_report_viewer"
-SETTINGS_FILE = DATA_DIR / "settings.json"
 MAX_REPORT_BYTES = 16 * 1024 * 1024
+TRUNCATION_NOTICE = "\n\n[Raw preview truncated by viewer at 16 MiB]\n"
 
 
-def _load_settings() -> dict:
-    try:
-        return json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
-    except (OSError, ValueError, TypeError):
-        return {}
-
-
-def _connect_egm(ip: str):
-    try:
-        import paramiko
-    except ImportError as exc:
-        raise RuntimeError(
-            "paramiko is not installed; run: py -3 -m pip install paramiko"
-        ) from exc
-    client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    client.connect(ip, username="mk7", password="mk7", timeout=15)
-    return client
-
-
-def list_remote_reports(ip: str, search_root: str) -> List[dict]:
-    """Return ASAN-like text reports below an EGM build/search root."""
-    root = shlex.quote(search_root)
-    command = (
-        f"find {root} -type f "
-        r"\( -path '*/scratch/.logs/mem_profile*/*' "
-        r"-o -iname '*asan*.log*' -o -iname '*asan*.txt*' \) "
-        r"! -name '*.heap' ! -name '*.pdf' "
-        r"-printf '%T@\t%s\t%p\n' 2>/dev/null | sort -nr"
-    )
-    client = _connect_egm(ip)
-    try:
-        _, stdout, stderr = client.exec_command(command)
-        exit_code = stdout.channel.recv_exit_status()
-        output = stdout.read().decode(errors="replace")
-        if exit_code not in (0, 1):
-            error = stderr.read().decode(errors="replace").strip()
-            raise RuntimeError(error or f"Remote find failed with exit {exit_code}")
-    finally:
-        client.close()
-
-    reports = []
-    for line in output.splitlines():
-        parts = line.split("\t", 2)
-        if len(parts) != 3:
-            continue
-        try:
-            modified, size = float(parts[0]), int(parts[1])
-        except ValueError:
-            continue
-        reports.append({"path": parts[2], "modified": modified, "size": size})
-    return reports
-
-
-def read_remote_report(ip: str, remote_path: str) -> str:
-    client = _connect_egm(ip)
-    try:
-        sftp = client.open_sftp()
-        try:
-            with sftp.open(remote_path, "rb") as stream:
-                data = stream.read(MAX_REPORT_BYTES + 1)
-        finally:
-            sftp.close()
-    finally:
-        client.close()
+def read_local_report(path: Path) -> str:
+    """Read a bounded preview; analysis streams the complete file separately."""
+    with path.open("rb") as stream:
+        data = stream.read(MAX_REPORT_BYTES + 1)
+    suffix = b""
     if len(data) > MAX_REPORT_BYTES:
         data = data[:MAX_REPORT_BYTES]
-        suffix = b"\n\n[Report truncated by viewer at 16 MiB]\n"
-    else:
-        suffix = b""
+        suffix = TRUNCATION_NOTICE.encode("utf-8")
     return (data + suffix).decode("utf-8", errors="replace")
-
-
-def summarize_asan(text: str) -> dict:
-    types = re.findall(
-        r"ERROR:\s*AddressSanitizer:\s*([^\s:]+)", text,
-        flags=re.IGNORECASE,
-    )
-    direct = sum(int(value) for value in re.findall(
-        r"^\s*Direct leak of\s+(\d+)\s+byte", text,
-        flags=re.IGNORECASE | re.MULTILINE,
-    ))
-    indirect = sum(int(value) for value in re.findall(
-        r"^\s*Indirect leak of\s+(\d+)\s+byte", text,
-        flags=re.IGNORECASE | re.MULTILINE,
-    ))
-    leak_summary = re.search(
-        r"SUMMARY:\s*AddressSanitizer:\s*(\d+)\s+byte(?:\(s\)|s)? leaked in\s+"
-        r"(\d+)\s+allocation(?:\(s\)|s)?", text, flags=re.IGNORECASE,
-    )
-    return {
-        "errors": len(re.findall(r"ERROR:\s*AddressSanitizer", text, re.I)),
-        "summaries": len(re.findall(r"SUMMARY:\s*AddressSanitizer", text, re.I)),
-        "types": sorted(set(types)),
-        "direct_bytes": direct,
-        "indirect_bytes": indirect,
-        "leaked_bytes": int(leak_summary.group(1)) if leak_summary else direct + indirect,
-        "allocations": int(leak_summary.group(2)) if leak_summary else 0,
-        "suppressions": "Suppressions used:" in text,
-    }
 
 
 class AsanReportTab(tk.Frame):
@@ -135,109 +42,54 @@ class AsanReportTab(tk.Frame):
             standalone = True
         super().__init__(master, bg=C_BG)
         self._closed = False
-        self._request_id = 0
-        self._records: List[dict] = []
-        self._display_records: Dict[str, dict] = {}
-        self._loaded_text = ""
-        self._loaded_name = ""
-
-        settings = _load_settings()
-        mode = settings.get("mode", "Remote EGM")
-        if mode not in {"Remote EGM", "Local folder"}:
-            mode = "Remote EGM"
-        self._mode_var = tk.StringVar(value=mode)
-        self._ip_var = tk.StringVar(value=settings.get("ip", ""))
-        self._root_var = tk.StringVar(
-            value=settings.get("root", "") or "/home/mk7/development"
-        )
-        self._local_var = tk.StringVar(value=settings.get("local", ""))
-        self._filter_var = tk.StringVar(value="")
-        self._status_var = tk.StringVar(value="Choose a source and refresh")
-        self._summary_var = tk.StringVar(value="No report selected")
+        self._preview_request_id = 0
+        self._analysis_request_id = 0
+        self._analysis_output = ""
+        self._file_var = tk.StringVar()
+        self._status_var = tk.StringVar(value="Select an ASAN report file")
+        self._summary_var = tk.StringVar(value="No report analyzed")
 
         if standalone:
             root = self.winfo_toplevel()
-            root.title("ASAN Report Viewer")
-            root.geometry("1280x780")
+            root.title("ASAN Report Analyzer")
+            root.geometry("1100x760")
             self.pack(fill=tk.BOTH, expand=True)
 
         self._build_ui()
-        for variable in (self._mode_var, self._ip_var, self._root_var, self._local_var):
-            variable.trace_add("write", self._save_settings)
-        self._filter_var.trace_add("write", lambda *_: self._populate_tree())
         self.bind("<Destroy>", self._on_destroy, add="+")
 
     def _build_ui(self):
         controls = tk.Frame(self, bg=C_SURFACE, padx=12, pady=10)
         controls.pack(fill=tk.X, padx=10, pady=(10, 6))
-        tk.Label(controls, text="Source:", bg=C_SURFACE, fg=C_TEXT).grid(row=0, column=0)
-        mode = ttk.Combobox(
-            controls, textvariable=self._mode_var,
-            values=["Remote EGM", "Local folder"], state="readonly", width=13,
+        tk.Label(controls, text="ASAN report:", bg=C_SURFACE, fg=C_TEXT).grid(
+            row=0, column=0, sticky="w"
         )
-        mode.grid(row=0, column=1, padx=(5, 12), sticky="w")
-        mode.bind("<<ComboboxSelected>>", self._mode_changed)
-
-        self._remote_fields = tk.Frame(controls, bg=C_SURFACE)
-        tk.Label(self._remote_fields, text="IP:", bg=C_SURFACE).pack(side=tk.LEFT)
-        ttk.Entry(self._remote_fields, textvariable=self._ip_var, width=17).pack(
-            side=tk.LEFT, padx=(4, 10)
+        ttk.Entry(controls, textvariable=self._file_var).grid(
+            row=0, column=1, padx=(6, 6), sticky="ew"
         )
-        tk.Label(self._remote_fields, text="Build/search root:", bg=C_SURFACE).pack(side=tk.LEFT)
-        ttk.Entry(self._remote_fields, textvariable=self._root_var, width=58).pack(
-            side=tk.LEFT, padx=(4, 0), fill=tk.X, expand=True
+        ttk.Button(controls, text="Browse…", command=self._browse).grid(
+            row=0, column=2, padx=(0, 6)
         )
-
-        self._local_fields = tk.Frame(controls, bg=C_SURFACE)
-        tk.Label(self._local_fields, text="Report folder:", bg=C_SURFACE).pack(side=tk.LEFT)
-        ttk.Entry(self._local_fields, textvariable=self._local_var, width=64).pack(
-            side=tk.LEFT, padx=(4, 4), fill=tk.X, expand=True
+        self._start_button = ttk.Button(
+            controls, text="Start Analysis", command=self._start_analysis
         )
-        ttk.Button(self._local_fields, text="Browse…", command=self._browse).pack(side=tk.LEFT)
-
-        ttk.Button(controls, text="Refresh Reports", command=self.refresh).grid(
-            row=1, column=1, pady=(9, 0), sticky="w"
-        )
-        tk.Label(controls, text="Filter:", bg=C_SURFACE).grid(
-            row=1, column=2, pady=(9, 0), padx=(12, 4), sticky="e"
-        )
-        ttk.Entry(controls, textvariable=self._filter_var, width=35).grid(
-            row=1, column=3, pady=(9, 0), sticky="w"
-        )
+        self._start_button.grid(row=0, column=3, padx=(0, 6))
         ttk.Button(controls, text="Save Copy…", command=self._save_copy).grid(
-            row=1, column=4, pady=(9, 0), padx=(8, 0), sticky="w"
+            row=0, column=4, padx=(0, 6)
         )
+        self._save_analysis_button = ttk.Button(
+            controls, text="Save Analysis…", command=self._save_analysis,
+            state=tk.DISABLED,
+        )
+        self._save_analysis_button.grid(row=0, column=5)
         tk.Label(
             controls, textvariable=self._status_var, bg=C_SURFACE, fg=C_MUTED,
-            anchor="e",
-        ).grid(row=1, column=5, pady=(9, 0), padx=(12, 0), sticky="ew")
-        controls.grid_columnconfigure(3, weight=1)
-        controls.grid_columnconfigure(5, weight=1)
-        self._mode_changed()
+            anchor="w",
+        ).grid(row=1, column=0, columnspan=6, pady=(8, 0), sticky="ew")
+        controls.grid_columnconfigure(1, weight=1)
 
-        pane = tk.PanedWindow(self, orient=tk.HORIZONTAL, bg=C_BG, sashwidth=5, bd=0)
-        pane.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
-        left = tk.Frame(pane, bg=C_SURFACE)
-        right = tk.Frame(pane, bg=C_SURFACE)
-        pane.add(left, minsize=360)
-        pane.add(right, stretch="always", minsize=550)
-
-        columns = ("modified", "size", "path")
-        self._tree = ttk.Treeview(left, columns=columns, show="headings", selectmode="browse")
-        self._tree.heading("modified", text="Modified")
-        self._tree.heading("size", text="Size")
-        self._tree.heading("path", text="Report")
-        self._tree.column("modified", width=125, anchor="w")
-        self._tree.column("size", width=75, anchor="e")
-        self._tree.column("path", width=360, anchor="w")
-        ybar = ttk.Scrollbar(left, orient=tk.VERTICAL, command=self._tree.yview)
-        self._tree.configure(yscrollcommand=ybar.set)
-        self._tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        ybar.pack(side=tk.RIGHT, fill=tk.Y)
-        self._tree.bind("<<TreeviewSelect>>", self._report_selected)
-
-        summary = tk.Frame(right, bg="#EEEAF8", padx=12, pady=9)
-        summary.pack(fill=tk.X)
+        summary = tk.Frame(self, bg="#EEEAF8", padx=12, pady=9)
+        summary.pack(fill=tk.X, padx=10)
         tk.Label(
             summary, text="ASAN Summary", bg="#EEEAF8", fg=C_ACCENT,
             font=("Segoe UI", 11, "bold"),
@@ -247,193 +99,201 @@ class AsanReportTab(tk.Frame):
             anchor="e",
         ).pack(side=tk.RIGHT, fill=tk.X, expand=True)
 
-        text_frame = tk.Frame(right, bg=C_SURFACE)
-        text_frame.pack(fill=tk.BOTH, expand=True)
-        self._text = tk.Text(
-            text_frame, wrap=tk.NONE, font=("Consolas", 9), bg="#FCFCFE",
-            fg=C_TEXT, insertbackground=C_TEXT, padx=8, pady=8,
-        )
-        ytext = ttk.Scrollbar(text_frame, orient=tk.VERTICAL, command=self._text.yview)
-        xtext = ttk.Scrollbar(text_frame, orient=tk.HORIZONTAL, command=self._text.xview)
-        self._text.configure(yscrollcommand=ytext.set, xscrollcommand=xtext.set)
-        self._text.grid(row=0, column=0, sticky="nsew")
-        ytext.grid(row=0, column=1, sticky="ns")
-        xtext.grid(row=1, column=0, sticky="ew")
-        text_frame.grid_rowconfigure(0, weight=1)
-        text_frame.grid_columnconfigure(0, weight=1)
-        self._text.tag_configure("error", foreground=C_ERROR, font=("Consolas", 9, "bold"))
-        self._text.tag_configure("summary", foreground=C_ACCENT, font=("Consolas", 9, "bold"))
-        self._text.tag_configure("leak", foreground=C_WARN)
-        self._text.configure(state=tk.DISABLED)
+        self._tabs = ttk.Notebook(self)
+        self._tabs.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
+        raw_tab = tk.Frame(self._tabs, bg=C_SURFACE)
+        analysis_tab = tk.Frame(self._tabs, bg=C_SURFACE)
+        self._tabs.add(raw_tab, text="Raw Report")
+        self._tabs.add(analysis_tab, text="Offline Analysis")
 
-    def _mode_changed(self, _event=None):
-        if self._mode_var.get() == "Remote EGM":
-            self._local_fields.grid_remove()
-            self._remote_fields.grid(row=0, column=2, columnspan=4, sticky="ew")
-        else:
-            self._remote_fields.grid_remove()
-            self._local_fields.grid(row=0, column=2, columnspan=4, sticky="ew")
-        self._request_id += 1
+        self._text = self._add_text_view(raw_tab, wrap=tk.NONE)
+        self._analysis_text = self._add_text_view(analysis_tab, wrap=tk.WORD)
+        self._set_text(
+            self._analysis_text,
+            "Select a report, then click Start Analysis.",
+        )
+
+    @staticmethod
+    def _add_text_view(parent, wrap):
+        frame = tk.Frame(parent, bg=C_SURFACE)
+        frame.pack(fill=tk.BOTH, expand=True)
+        text = tk.Text(
+            frame, wrap=wrap, font=("Consolas", 9), bg="#FCFCFE",
+            fg=C_TEXT, insertbackground=C_TEXT, padx=10, pady=10,
+        )
+        ybar = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=text.yview)
+        text.configure(yscrollcommand=ybar.set)
+        text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        ybar.pack(side=tk.RIGHT, fill=tk.Y)
+        text.configure(state=tk.DISABLED)
+        return text
+
+    @staticmethod
+    def _set_text(widget, value: str):
+        widget.configure(state=tk.NORMAL)
+        widget.delete("1.0", tk.END)
+        widget.insert("1.0", value)
+        widget.configure(state=tk.DISABLED)
 
     def _browse(self):
-        folder = filedialog.askdirectory(parent=self, title="Select ASAN report folder")
-        if folder:
-            self._local_var.set(folder)
-            self.refresh()
+        path = filedialog.askopenfilename(
+            parent=self,
+            title="Select ASAN report",
+            filetypes=[("Text and log files", "*.txt *.log"), ("All files", "*.*")],
+        )
+        if path:
+            self._analysis_request_id += 1
+            self._analysis_output = ""
+            self._file_var.set(path)
+            self._start_button.configure(state=tk.NORMAL)
+            self._save_analysis_button.configure(state=tk.DISABLED)
+            self._summary_var.set("No report analyzed")
+            self._set_text(
+                self._analysis_text,
+                "File selected. Click Start Analysis.",
+            )
+            self._load_preview(Path(path))
 
-    def refresh(self):
-        self._request_id += 1
-        request_id = self._request_id
-        self._status_var.set("Finding ASAN reports…")
-        mode = self._mode_var.get()
-        ip = self._ip_var.get().strip()
-        root = self._root_var.get().strip()
-        local = self._local_var.get().strip()
+    def _selected_file(self) -> Path:
+        path = Path(self._file_var.get().strip())
+        if not path.is_file():
+            raise FileNotFoundError(f"File not found: {path}")
+        return path
+
+    def _load_preview(self, path: Path):
+        self._preview_request_id += 1
+        request_id = self._preview_request_id
+        self._status_var.set(f"Loading preview for {path.name}…")
 
         def worker():
             try:
-                if mode == "Remote EGM":
-                    if not ip or not root:
-                        raise ValueError("Enter the EGM IP and build/search root")
-                    records = list_remote_reports(ip, root)
-                else:
-                    if not local:
-                        raise ValueError("Select a local report folder")
-                    records = self._list_local(Path(local))
-                self.after(0, lambda: self._refresh_done(request_id, records))
+                preview = read_local_report(path)
+                self.after(0, lambda: self._show_preview(request_id, path, preview))
             except Exception as exc:
-                message = str(exc)
-                try:
-                    self.after(0, lambda: self._failed(request_id, message))
-                except (RuntimeError, tk.TclError):
-                    pass
+                self._post_error(request_id, str(exc), preview=True)
 
         threading.Thread(target=worker, daemon=True).start()
 
-    @staticmethod
-    def _list_local(folder: Path) -> List[dict]:
-        if not folder.is_dir():
-            raise FileNotFoundError(f"Folder not found: {folder}")
-        records = []
-        for path in folder.rglob("*"):
-            if not path.is_file() or path.suffix.lower() in {".heap", ".pdf"}:
-                continue
-            stat = path.stat()
-            records.append({"path": str(path), "modified": stat.st_mtime, "size": stat.st_size})
-        return sorted(records, key=lambda item: item["modified"], reverse=True)
-
-    def _refresh_done(self, request_id: int, records: List[dict]):
-        if self._closed or request_id != self._request_id:
+    def _show_preview(self, request_id: int, path: Path, preview: str):
+        if self._closed or request_id != self._preview_request_id:
             return
-        self._records = records
-        self._populate_tree()
-        self._status_var.set(f"{len(records)} ASAN report(s) found")
+        self._set_text(self._text, preview)
+        if self._start_button.instate(["!disabled"]):
+            note = (
+                "; preview limited to 16 MiB"
+                if path.stat().st_size > MAX_REPORT_BYTES else ""
+            )
+            self._status_var.set(f"Selected {path.name}{note}; click Start Analysis")
+            self._tabs.select(0)
 
-    def _failed(self, request_id: int, message: str):
-        if not self._closed and request_id == self._request_id:
+    def _start_analysis(self):
+        try:
+            path = self._selected_file()
+        except OSError as exc:
+            self._status_var.set(str(exc))
+            return
+
+        self._analysis_request_id += 1
+        request_id = self._analysis_request_id
+        self._analysis_output = ""
+        self._start_button.configure(state=tk.DISABLED)
+        self._save_analysis_button.configure(state=tk.DISABLED)
+        self._set_text(self._analysis_text, "Analyzing complete report offline…")
+        self._status_var.set(f"Analyzing {path.name} offline…")
+
+        def worker():
+            try:
+                result = analyze_file(path)
+                output = format_analysis(result)
+                self.after(0, lambda: self._show_analysis(
+                    request_id, path.name, result, output
+                ))
+            except Exception as exc:
+                self._post_error(request_id, str(exc), preview=False)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _show_analysis(
+        self, request_id: int, report_name: str, result: dict, output: str,
+    ):
+        if self._closed or request_id != self._analysis_request_id:
+            return
+        self._analysis_output = output
+        self._set_text(self._analysis_text, output)
+        self._start_button.configure(state=tk.NORMAL)
+        self._save_analysis_button.configure(state=tk.NORMAL)
+        self._tabs.select(1)
+        totals = result["totals"]
+        stats = result["stats"]
+        self._summary_var.set(
+            f"Reports {stats['reports_completed']}/{stats['reports_started']}  •  "
+            f"Candidate {totals['candidate']['signatures']}  •  "
+            f"Suppressed {totals['suppressed']['signatures']}  •  "
+            f"Needs review {totals['uncertain']['signatures']}"
+        )
+        self._status_var.set(f"Offline analysis ready for {report_name}")
+
+    def _post_error(self, request_id: int, message: str, preview: bool):
+        def show():
+            current = self._preview_request_id if preview else self._analysis_request_id
+            if self._closed or request_id != current:
+                return
+            if not preview:
+                self._set_text(self._analysis_text, f"Offline analysis failed:\n{message}")
+                self._start_button.configure(state=tk.NORMAL)
             self._status_var.set(message)
 
-    def _populate_tree(self):
-        query = self._filter_var.get().strip().lower()
-        for item in self._tree.get_children():
-            self._tree.delete(item)
-        self._display_records.clear()
-        for record in self._records:
-            path = record["path"]
-            if query and query not in path.lower():
-                continue
-            iid = self._tree.insert("", tk.END, values=(
-                datetime.fromtimestamp(record["modified"]).strftime("%d %b %H:%M:%S"),
-                self._format_size(record["size"]),
-                path,
-            ))
-            self._display_records[iid] = record
+        try:
+            self.after(0, show)
+        except (RuntimeError, tk.TclError):
+            pass
 
-    def _report_selected(self, _event=None):
-        selected = self._tree.selection()
-        if not selected:
+    def _save_copy(self):
+        try:
+            source = self._selected_file()
+        except OSError as exc:
+            self._status_var.set(str(exc))
             return
-        record = self._display_records.get(selected[0])
-        if not record:
+        target = filedialog.asksaveasfilename(
+            parent=self, title="Save ASAN report", initialfile=source.name,
+            defaultextension=".txt",
+        )
+        if not target:
             return
-        self._request_id += 1
-        request_id = self._request_id
-        path = record["path"]
-        mode = self._mode_var.get()
-        ip = self._ip_var.get().strip()
-        self._status_var.set(f"Loading {Path(path).name}…")
+        target_path = Path(target)
+        if source.resolve() == target_path.resolve():
+            self._status_var.set("Source and destination are the same file")
+            return
+        self._status_var.set(f"Saving complete report to {target_path}…")
 
         def worker():
             try:
-                text = read_remote_report(ip, path) if mode == "Remote EGM" else Path(path).read_text(
-                    encoding="utf-8", errors="replace"
-                )
-                self.after(0, lambda: self._show_report(request_id, path, text))
+                shutil.copyfile(source, target_path)
+                self.after(0, lambda: self._status_var.set(f"Saved {target_path}"))
             except Exception as exc:
-                message = str(exc)
-                try:
-                    self.after(0, lambda: self._failed(request_id, message))
-                except (RuntimeError, tk.TclError):
-                    pass
+                self._post_save_error(str(exc))
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _show_report(self, request_id: int, path: str, text: str):
-        if self._closed or request_id != self._request_id:
-            return
-        self._loaded_text = text
-        self._loaded_name = Path(path).name
-        summary = summarize_asan(text)
-        kinds = ", ".join(summary["types"]) or "no sanitizer signature"
-        self._summary_var.set(
-            f"Errors {summary['errors']}  •  Leaked {self._format_size(summary['leaked_bytes'])}  "
-            f"•  Allocations {summary['allocations']}  •  {kinds}"
-        )
-        self._text.configure(state=tk.NORMAL)
-        self._text.delete("1.0", tk.END)
-        for line in text.splitlines(keepends=True):
-            tag = None
-            if "ERROR: AddressSanitizer" in line:
-                tag = "error"
-            elif "SUMMARY: AddressSanitizer" in line or "Suppressions used:" in line:
-                tag = "summary"
-            elif re.search(r"(?:Direct|Indirect|Possible) leak", line, re.I):
-                tag = "leak"
-            self._text.insert(tk.END, line, tag)
-        self._text.configure(state=tk.DISABLED)
-        self._status_var.set(f"Loaded {self._loaded_name}")
-
-    def _save_copy(self):
-        if not self._loaded_text:
-            self._status_var.set("Select and load a report first")
-            return
-        target = filedialog.asksaveasfilename(
-            parent=self, title="Save ASAN report",
-            initialfile=self._loaded_name or "asan_report.txt",
-            defaultextension=".txt",
-        )
-        if target:
-            Path(target).write_text(self._loaded_text, encoding="utf-8")
-            self._status_var.set(f"Saved {target}")
-
-    def _save_settings(self, *_args):
+    def _post_save_error(self, message: str):
         try:
-            DATA_DIR.mkdir(parents=True, exist_ok=True)
-            SETTINGS_FILE.write_text(json.dumps({
-                "mode": self._mode_var.get(), "ip": self._ip_var.get(),
-                "root": self._root_var.get(), "local": self._local_var.get(),
-            }, indent=2), encoding="utf-8")
-        except (OSError, tk.TclError):
+            self.after(0, lambda: self._status_var.set(f"Save failed: {message}"))
+        except (RuntimeError, tk.TclError):
             pass
 
-    @staticmethod
-    def _format_size(size: int) -> str:
-        value = float(size)
-        for unit in ("B", "KiB", "MiB", "GiB"):
-            if value < 1024 or unit == "GiB":
-                return f"{value:.0f} {unit}" if unit == "B" else f"{value:.1f} {unit}"
-            value /= 1024
-        return str(size)
+    def _save_analysis(self):
+        if not self._analysis_output:
+            self._status_var.set("Run analysis first")
+            return
+        source = Path(self._file_var.get().strip() or "asan_report.txt")
+        target = filedialog.asksaveasfilename(
+            parent=self, title="Save offline ASAN analysis",
+            initialfile=f"{source.stem}_offline_analysis.txt",
+            defaultextension=".txt", filetypes=[("Text files", "*.txt")],
+        )
+        if target:
+            Path(target).write_text(self._analysis_output, encoding="utf-8")
+            self._status_var.set(f"Saved {target}")
 
     def _on_destroy(self, event):
         if event.widget is self:
