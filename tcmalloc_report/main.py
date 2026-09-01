@@ -9,6 +9,7 @@ import posixpath
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import threading
@@ -58,15 +59,58 @@ def _heap_number(path: str) -> str:
     return match.group(1) if match else ""
 
 
-def list_remote_heaps(ip: str, search_root: str) -> List[dict]:
-    root = shlex.quote(search_root)
+def _normalise_host_path(path: str) -> str:
+    path = posixpath.normpath(path.strip())
+    if not path.startswith("/") or path == "/":
+        raise ValueError(
+            "Enter an absolute EGM host path, for example "
+            "/home/mk7/development/game/build/host"
+        )
+    return path
+
+
+def _is_tcmalloc_config(text: str) -> bool:
+    return bool(re.search(r"^\s*usetcmalloc\s*=\s*(?:true|1|yes)\s*$", text, re.I | re.M))
+
+
+def _validate_remote_host(client, host_path: str):
+    sftp = client.open_sftp()
+    try:
+        try:
+            attributes = sftp.stat(host_path)
+        except OSError as exc:
+            raise FileNotFoundError(
+                f"Host path does not exist on the EGM: {host_path}"
+            ) from exc
+        if not stat.S_ISDIR(attributes.st_mode):
+            raise NotADirectoryError(f"Host path is not a directory: {host_path}")
+
+        config_path = posixpath.join(host_path, ".mk7conf")
+        try:
+            with sftp.open(config_path, "rb") as stream:
+                config = stream.read().decode("utf-8", errors="replace")
+        except OSError as exc:
+            raise FileNotFoundError(
+                f"Invalid host path: {config_path} was not found"
+            ) from exc
+        if not _is_tcmalloc_config(config):
+            raise ValueError(
+                "Not a tcMalloc build: .mk7conf does not contain usetcmalloc=True"
+            )
+    finally:
+        sftp.close()
+
+
+def list_remote_heaps(ip: str, host_path: str) -> List[dict]:
+    host_path = _normalise_host_path(host_path)
+    heap_root = posixpath.join(host_path, "scratch", ".logs", "mem_profiles")
     command = (
-        f"find {root} -type f -name '*.heap' "
-        r"-path '*/scratch/.logs/mem_profile*/*' "
+        f"find {shlex.quote(heap_root)} -type f -name '*.heap' "
         r"-printf '%T@\t%s\t%p\n' 2>/dev/null | sort -nr"
     )
     client = _connect_egm(ip)
     try:
+        _validate_remote_host(client, host_path)
         _, stdout, stderr = client.exec_command(command)
         exit_code = stdout.channel.recv_exit_status()
         output = stdout.read().decode(errors="replace")
@@ -88,31 +132,33 @@ def list_remote_heaps(ip: str, search_root: str) -> List[dict]:
         records.append({
             "path": parts[2], "modified": modified, "size": size,
             "number": _heap_number(parts[2]),
+            "name": posixpath.basename(parts[2]),
         })
     return records
 
 
-def analyze_remote_heap(ip: str, search_root: str, heap_path: str) -> Tuple[Path, str]:
+def analyze_remote_heap(ip: str, host_path: str, heap_path: str) -> Tuple[Path, str]:
     """Run tcMalloc_profiler.sh for ``heap_path`` and download its PDF."""
     end_number = _heap_number(heap_path)
     if not end_number:
         raise ValueError(f"Could not determine heap number from: {heap_path}")
 
+    host_path = _normalise_host_path(host_path)
     client = _connect_egm(ip)
     try:
-        find_script = (
-            f"find {shlex.quote(search_root)} -type f -name 'tcMalloc_profiler.sh' "
-            r"-path '*/common/build/*' -print -quit 2>/dev/null"
+        _validate_remote_host(client, host_path)
+        script = posixpath.join(
+            host_path, "common", "build", "tcMalloc_profiler.sh"
         )
-        _, stdout, stderr = client.exec_command(find_script)
-        stdout.channel.recv_exit_status()
-        script = stdout.read().decode(errors="replace").strip()
-        if not script:
-            error = stderr.read().decode(errors="replace").strip()
+        sftp = client.open_sftp()
+        try:
+            sftp.stat(script)
+        except OSError as exc:
             raise FileNotFoundError(
-                "tcMalloc_profiler.sh was not found below the search root"
-                + (f": {error}" if error else "")
-            )
+                f"tcMalloc_profiler.sh was not found in the build: {script}"
+            ) from exc
+        finally:
+            sftp.close()
 
         script_dir = posixpath.dirname(script)
         heap_dir = posixpath.dirname(heap_path)
@@ -176,17 +222,12 @@ class TcMallocReportTab(tk.Frame):
         self._latest_pdf: Optional[Path] = None
 
         settings = _load_settings()
-        mode = settings.get("mode", "Remote EGM")
-        if mode not in {"Remote EGM", "Local folder"}:
-            mode = "Remote EGM"
-        self._mode_var = tk.StringVar(value=mode)
         self._ip_var = tk.StringVar(value=settings.get("ip", ""))
-        self._root_var = tk.StringVar(
-            value=settings.get("root", "") or "/home/mk7/development"
+        self._host_var = tk.StringVar(
+            value=settings.get("host", "")
         )
-        self._local_var = tk.StringVar(value=settings.get("local", ""))
         self._filter_var = tk.StringVar(value="")
-        self._status_var = tk.StringVar(value="Choose a source and refresh")
+        self._status_var = tk.StringVar(value="Enter the EGM IP and host path")
         self._selection_var = tk.StringVar(value="No heap selected")
 
         if standalone:
@@ -196,52 +237,42 @@ class TcMallocReportTab(tk.Frame):
             self.pack(fill=tk.BOTH, expand=True)
 
         self._build_ui()
-        for variable in (self._mode_var, self._ip_var, self._root_var, self._local_var):
-            variable.trace_add("write", self._save_settings)
-        self._filter_var.trace_add("write", lambda *_: self._populate_tree())
+        for variable in (self._ip_var, self._host_var):
+            variable.trace_add("write", self._connection_changed)
+        self._filter_var.trace_add("write", self._filter_changed)
         self.bind("<Destroy>", self._on_destroy, add="+")
 
     def _build_ui(self):
         controls = tk.Frame(self, bg=C_SURFACE, padx=12, pady=10)
         controls.pack(fill=tk.X, padx=10, pady=(10, 6))
-        tk.Label(controls, text="Source:", bg=C_SURFACE, fg=C_TEXT).grid(row=0, column=0)
-        mode = ttk.Combobox(
-            controls, textvariable=self._mode_var,
-            values=["Remote EGM", "Local folder"], state="readonly", width=13,
+        tk.Label(controls, text="EGM IP:", bg=C_SURFACE, fg=C_TEXT).grid(
+            row=0, column=0, sticky="w"
         )
-        mode.grid(row=0, column=1, padx=(5, 12), sticky="w")
-        mode.bind("<<ComboboxSelected>>", self._mode_changed)
+        ttk.Entry(controls, textvariable=self._ip_var, width=18).grid(
+            row=0, column=1, padx=(5, 12), sticky="w"
+        )
+        tk.Label(controls, text="Host path:", bg=C_SURFACE, fg=C_TEXT).grid(
+            row=0, column=2, sticky="e"
+        )
+        ttk.Entry(controls, textvariable=self._host_var).grid(
+            row=0, column=3, columnspan=3, padx=(5, 8), sticky="ew"
+        )
+        self._refresh_button = ttk.Button(
+            controls, text="Load Heap Files", command=self.refresh
+        )
+        self._refresh_button.grid(row=0, column=6, sticky="w")
 
-        self._remote_fields = tk.Frame(controls, bg=C_SURFACE)
-        tk.Label(self._remote_fields, text="IP:", bg=C_SURFACE).pack(side=tk.LEFT)
-        ttk.Entry(self._remote_fields, textvariable=self._ip_var, width=17).pack(
-            side=tk.LEFT, padx=(4, 10)
-        )
-        tk.Label(self._remote_fields, text="Build/search root:", bg=C_SURFACE).pack(side=tk.LEFT)
-        ttk.Entry(self._remote_fields, textvariable=self._root_var, width=58).pack(
-            side=tk.LEFT, padx=(4, 0), fill=tk.X, expand=True
-        )
-
-        self._local_fields = tk.Frame(controls, bg=C_SURFACE)
-        tk.Label(self._local_fields, text="Heap folder:", bg=C_SURFACE).pack(side=tk.LEFT)
-        ttk.Entry(self._local_fields, textvariable=self._local_var, width=64).pack(
-            side=tk.LEFT, padx=(4, 4), fill=tk.X, expand=True
-        )
-        ttk.Button(self._local_fields, text="Browse…", command=self._browse).pack(side=tk.LEFT)
-
-        ttk.Button(controls, text="Refresh Heaps", command=self.refresh).grid(
-            row=1, column=1, pady=(9, 0), sticky="w"
-        )
         tk.Label(controls, text="Filter:", bg=C_SURFACE).grid(
-            row=1, column=2, pady=(9, 0), padx=(12, 4), sticky="e"
+            row=1, column=0, pady=(9, 0), sticky="w"
         )
         ttk.Entry(controls, textvariable=self._filter_var, width=32).grid(
-            row=1, column=3, pady=(9, 0), sticky="w"
+            row=1, column=1, columnspan=3, pady=(9, 0), padx=(5, 8), sticky="ew"
         )
-        self._analyze_button = ttk.Button(
-            controls, text="Analyze Selected Heap", command=self._analyze,
+        self._convert_button = ttk.Button(
+            controls, text="Convert to PDF", command=self._analyze,
+            state=tk.DISABLED,
         )
-        self._analyze_button.grid(row=1, column=4, pady=(9, 0), padx=(8, 0), sticky="w")
+        self._convert_button.grid(row=1, column=4, pady=(9, 0), sticky="w")
         ttk.Button(controls, text="Open PDF", command=self._open_pdf).grid(
             row=1, column=5, pady=(9, 0), padx=(4, 0), sticky="w"
         )
@@ -249,14 +280,13 @@ class TcMallocReportTab(tk.Frame):
             row=1, column=6, pady=(9, 0), padx=(4, 0), sticky="w"
         )
         controls.grid_columnconfigure(3, weight=1)
-        self._mode_changed()
 
         notice = tk.Frame(self, bg="#FFF4D6", padx=12, pady=7)
         notice.pack(fill=tk.X, padx=10, pady=(0, 6))
         tk.Label(
             notice,
-            text="tcMalloc analysis runs tcMalloc_profiler.sh on the EGM and downloads the generated PDF. "
-                 "ASAN and tcMalloc instrumented builds are mutually exclusive.",
+            text="Select a heap file, then click Convert to PDF. "
+                 "The build is validated using .mk7conf inside the host path.",
             bg="#FFF4D6", fg="#714B00", anchor="w",
         ).pack(fill=tk.X)
 
@@ -308,42 +338,26 @@ class TcMallocReportTab(tk.Frame):
             anchor="w",
         ).pack(fill=tk.X)
 
-    def _mode_changed(self, _event=None):
-        if self._mode_var.get() == "Remote EGM":
-            self._local_fields.grid_remove()
-            self._remote_fields.grid(row=0, column=2, columnspan=5, sticky="ew")
-            self._analyze_button.configure(state=tk.NORMAL)
-        else:
-            self._remote_fields.grid_remove()
-            self._local_fields.grid(row=0, column=2, columnspan=5, sticky="ew")
-            self._analyze_button.configure(state=tk.DISABLED)
-        self._request_id += 1
-
-    def _browse(self):
-        folder = filedialog.askdirectory(parent=self, title="Select tcMalloc heap folder")
-        if folder:
-            self._local_var.set(folder)
-            self.refresh()
-
     def refresh(self):
         self._request_id += 1
         request_id = self._request_id
-        mode = self._mode_var.get()
         ip = self._ip_var.get().strip()
-        root = self._root_var.get().strip()
-        local = self._local_var.get().strip()
-        self._status_var.set("Finding tcMalloc heap files…")
+        host = self._host_var.get().strip()
+        if not ip or not host:
+            self._status_var.set("Enter the EGM IP and host path")
+            return
+        self._refresh_button.configure(state=tk.DISABLED)
+        self._convert_button.configure(state=tk.DISABLED)
+        self._tree.configure(selectmode="none")
+        self._records = []
+        self._populate_tree()
+        self._selected_record = None
+        self._selection_var.set("No heap selected")
+        self._status_var.set("Validating build and finding tcMalloc heap files…")
 
         def worker():
             try:
-                if mode == "Remote EGM":
-                    if not ip or not root:
-                        raise ValueError("Enter the EGM IP and build/search root")
-                    records = list_remote_heaps(ip, root)
-                else:
-                    if not local:
-                        raise ValueError("Select a local heap folder")
-                    records = self._list_local(Path(local))
+                records = list_remote_heaps(ip, host)
                 self.after(0, lambda: self._refresh_done(request_id, records))
             except Exception as exc:
                 message = str(exc)
@@ -354,29 +368,22 @@ class TcMallocReportTab(tk.Frame):
 
         threading.Thread(target=worker, daemon=True).start()
 
-    @staticmethod
-    def _list_local(folder: Path) -> List[dict]:
-        if not folder.is_dir():
-            raise FileNotFoundError(f"Folder not found: {folder}")
-        records = []
-        for path in folder.rglob("*.heap"):
-            stat = path.stat()
-            records.append({
-                "path": str(path), "modified": stat.st_mtime,
-                "size": stat.st_size, "number": _heap_number(str(path)),
-            })
-        return sorted(records, key=lambda item: item["modified"], reverse=True)
-
     def _refresh_done(self, request_id: int, records: List[dict]):
         if self._closed or request_id != self._request_id:
             return
         self._records = records
         self._populate_tree()
+        self._refresh_button.configure(state=tk.NORMAL)
+        self._convert_button.configure(state=tk.DISABLED)
+        self._tree.configure(selectmode="browse")
         self._status_var.set(f"{len(records)} tcMalloc heap file(s) found")
 
     def _failed(self, request_id: int, message: str):
         if self._closed or request_id != self._request_id:
             return
+        self._refresh_button.configure(state=tk.NORMAL)
+        self._convert_button.configure(state=tk.DISABLED)
+        self._tree.configure(selectmode="browse")
         self._status_var.set(message.splitlines()[0] if message else "Operation failed")
         self._write_console(message, error=True)
 
@@ -386,12 +393,12 @@ class TcMallocReportTab(tk.Frame):
             self._tree.delete(item)
         self._display_records.clear()
         for record in self._records:
-            if query and query not in record["path"].lower():
+            if query and query not in record["name"].lower():
                 continue
             iid = self._tree.insert("", tk.END, values=(
                 record["number"] or "—",
                 datetime.fromtimestamp(record["modified"]).strftime("%d %b %H:%M:%S"),
-                self._format_size(record["size"]), record["path"],
+                self._format_size(record["size"]), record["name"],
             ))
             self._display_records[iid] = record
 
@@ -405,25 +412,28 @@ class TcMallocReportTab(tk.Frame):
         record = self._selected_record
         self._selection_var.set(
             f"Heap {record['number'] or '?'}  •  {self._format_size(record['size'])}  •  "
-            f"{Path(record['path']).name}"
+            f"{record['name']}"
         )
+        self._convert_button.configure(
+            state=tk.NORMAL if self._selected_record else tk.DISABLED
+        )
+        self._status_var.set(f"Selected {record['name']}; click Convert to PDF")
 
     def _analyze(self):
-        if self._mode_var.get() != "Remote EGM":
-            self._status_var.set("Analysis requires Remote EGM mode with mk7i-pprof")
-            return
         if not self._selected_record:
-            self._status_var.set("Select an end heap to analyze")
             return
         ip = self._ip_var.get().strip()
-        root = self._root_var.get().strip()
-        if not ip or not root:
-            self._status_var.set("Enter the EGM IP and build/search root")
+        host = self._host_var.get().strip()
+        if not ip or not host:
+            self._status_var.set("Enter the EGM IP and host path")
             return
         heap_path = self._selected_record["path"]
         self._request_id += 1
         request_id = self._request_id
-        self._analyze_button.configure(state=tk.DISABLED)
+        self._latest_pdf = None
+        self._convert_button.configure(state=tk.DISABLED)
+        self._tree.state(["disabled"])
+        self._refresh_button.configure(state=tk.DISABLED)
         self._status_var.set(f"Analyzing heap {_heap_number(heap_path)} on EGM {ip}…")
         self._write_console(
             f"Running tcMalloc_profiler.sh for:\n{heap_path}\n\nThis can take several minutes…\n"
@@ -431,7 +441,7 @@ class TcMallocReportTab(tk.Frame):
 
         def worker():
             try:
-                pdf, console = analyze_remote_heap(ip, root, heap_path)
+                pdf, console = analyze_remote_heap(ip, host, heap_path)
                 self.after(0, lambda: self._analysis_done(request_id, pdf, console))
             except Exception as exc:
                 message = str(exc)
@@ -446,14 +456,22 @@ class TcMallocReportTab(tk.Frame):
         if self._closed or request_id != self._request_id:
             return
         self._latest_pdf = pdf
-        self._analyze_button.configure(state=tk.NORMAL)
+        self._tree.state(["!disabled"])
+        self._refresh_button.configure(state=tk.NORMAL)
+        self._convert_button.configure(
+            state=tk.NORMAL if self._selected_record else tk.DISABLED
+        )
         self._write_console(console + f"\n\nDownloaded PDF:\n{pdf}\n", ok=True)
         self._status_var.set(f"Analysis complete: {pdf.name}")
 
     def _analysis_failed(self, request_id: int, message: str):
         if self._closed or request_id != self._request_id:
             return
-        self._analyze_button.configure(state=tk.NORMAL)
+        self._tree.state(["!disabled"])
+        self._refresh_button.configure(state=tk.NORMAL)
+        self._convert_button.configure(
+            state=tk.NORMAL if self._selected_record else tk.DISABLED
+        )
         self._status_var.set(message.splitlines()[0] if message else "Analysis failed")
         self._write_console(message, error=True)
 
@@ -494,11 +512,29 @@ class TcMallocReportTab(tk.Frame):
         try:
             DATA_DIR.mkdir(parents=True, exist_ok=True)
             SETTINGS_FILE.write_text(json.dumps({
-                "mode": self._mode_var.get(), "ip": self._ip_var.get(),
-                "root": self._root_var.get(), "local": self._local_var.get(),
+                "ip": self._ip_var.get(), "host": self._host_var.get(),
             }, indent=2), encoding="utf-8")
         except (OSError, tk.TclError):
             pass
+
+    def _connection_changed(self, *_args):
+        self._save_settings()
+        self._request_id += 1
+        self._records = []
+        self._selected_record = None
+        self._populate_tree()
+        self._tree.state(["!disabled"])
+        self._tree.configure(selectmode="browse")
+        self._refresh_button.configure(state=tk.NORMAL)
+        self._convert_button.configure(state=tk.DISABLED)
+        self._selection_var.set("No heap selected")
+        self._status_var.set("Click Load Heap Files to validate this build")
+
+    def _filter_changed(self, *_args):
+        self._selected_record = None
+        self._convert_button.configure(state=tk.DISABLED)
+        self._selection_var.set("No heap selected")
+        self._populate_tree()
 
     @staticmethod
     def _format_size(size: int) -> str:
