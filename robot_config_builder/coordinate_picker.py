@@ -30,11 +30,6 @@ class ProgressDialog(tk.Toplevel):
         px, py = parent.winfo_rootx(), parent.winfo_rooty()
         self.geometry(f"320x90+{px + pw // 2 - 160}+{py + ph // 2 - 45}")
 
-    def set_message(self, msg: str):
-        self._label.config(text=msg)
-        self.update_idletasks()
-
-
 class CoordinatePicker(tk.Toplevel):
     """
     Displays a screenshot scaled to fit the screen.

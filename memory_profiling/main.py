@@ -19,9 +19,9 @@ from tkinter import filedialog, ttk
 from typing import Dict, Iterable, List, Optional, Tuple
 
 try:
-    from meter_reader import ALL_METERS, MeterReader
+    from meter_reader import ALL_METERS, read_all_meters
 except ImportError:  # Package-style import, useful for tests and reuse.
-    from .meter_reader import ALL_METERS, MeterReader
+    from .meter_reader import ALL_METERS, read_all_meters
 
 
 C_BG = "#F3F0FA"
@@ -304,7 +304,6 @@ class MemoryProfilingTab(tk.Frame):
             master = tk.Tk()
             standalone = True
         super().__init__(master, bg=C_BG)
-        self._standalone = standalone
         self._root_window = self.winfo_toplevel()
         if standalone:
             self._root_window.title("Robot Memory Profiler")
@@ -602,7 +601,7 @@ class MemoryProfilingTab(tk.Frame):
             signature = (csv_path.stat().st_mtime_ns, csv_path.stat().st_size)
             if signature != self._last_file_signature:
                 imported = self._history.import_csv(csv_path)
-                self._current_values = MeterReader(csv_path).get_all_meters()
+                self._current_values = read_all_meters(csv_path)
                 self._last_file_signature = signature
                 self._update_value_labels()
                 self._status_var.set(

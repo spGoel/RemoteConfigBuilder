@@ -2,8 +2,7 @@ import xml.etree.ElementTree as ET
 from typing import List, Optional
 
 from models import (
-    RobotNode, ALL_METERS, ALL_EVENT_TYPES,
-    CONTAINER_TYPES, TOUCH_TYPES, LEAF_TYPES,
+    RobotNode, ALL_METERS, TOUCH_TYPES, LEAF_TYPES,
     ATTR_ORDER, ATTR_KEY_MAP,
 )
 
@@ -15,126 +14,105 @@ TAB = "\t"
 # ═══════════════════════════════════════
 
 def generate_xml(root_node: RobotNode) -> str:
-    return _node_to_str(root_node, 0)
+    root = _node_to_element(root_node)
+    _indent(root)
+    xml = ET.tostring(root, encoding='unicode', short_empty_elements=True)
+    if root_node.comment:
+        comment = ET.tostring(
+            ET.Comment(f" {root_node.comment} "), encoding='unicode'
+        )
+        return f"{comment}\n{xml}"
+    return xml
 
 
-def _node_to_str(node: RobotNode, indent: int) -> str:
-    pad = TAB * indent
-    lines = []
-
-    if node.comment:
-        lines.append(f"{pad}<!-- {node.comment} -->")
-
+def _node_to_element(node: RobotNode):
     if node.node_type == 'meter-list':
-        lines.append(_gen_meter_list(node, indent))
-    elif node.node_type == 'output':
-        if node.attrs.get('mode') == 'socket':
-            addr = node.attrs.get('address', '')
-            lines.append(f'{pad}<output address="{addr}"/>')
-        else:
-            fname = node.attrs.get('filename', 'robotlogs/eventsfile.txt')
-            append = node.attrs.get('append', 'False')
-            lines.append(f'{pad}<output filename="{fname}" append="{append}"/>')
-    elif node.node_type in TOUCH_TYPES:
-        lines.append(_gen_touch_event(node, indent))
-    elif node.node_type in LEAF_TYPES:
-        lines.append(_gen_leaf_event(node, indent))
-    else:
-        lines.append(_gen_container_event(node, indent))
+        return _meter_list_element(node)
+    if node.node_type == 'output':
+        return _output_element(
+            node.attrs.get('mode', 'file'),
+            node.attrs.get('filename', 'robotlogs/eventsfile.txt'),
+            node.attrs.get('append', 'False'),
+            node.attrs.get('address', ''),
+        )
 
-    return '\n'.join(lines)
-
-
-def _build_event_attrs(node: RobotNode) -> str:
-    parts = [f'type="{node.node_type}"']
+    attrs = {'type': node.node_type}
     if node.id:
-        parts.append(f'id="{node.id}"')
+        attrs['id'] = node.id
     if node.weight is not None:
-        parts.append(f'weight="{node.weight}"')
+        attrs['weight'] = str(node.weight)
     for key in ATTR_ORDER.get(node.node_type, []):
-        val = node.attrs.get(key)
-        if val is not None and val != '':
-            xml_key = ATTR_KEY_MAP.get(key, key)
-            parts.append(f'{xml_key}="{val}"')
-    return ' '.join(parts)
+        value = node.attrs.get(key)
+        if value is not None and value != '':
+            attrs[ATTR_KEY_MAP.get(key, key)] = str(value)
+
+    element = ET.Element('event', attrs)
+    if node.node_type in TOUCH_TYPES:
+        for x, y in node.points:
+            ET.SubElement(element, 'point', {'x': str(x), 'y': str(y)})
+    elif node.node_type not in LEAF_TYPES:
+        for child in node.children:
+            if child.comment:
+                element.append(ET.Comment(f" {child.comment} "))
+            element.append(_node_to_element(child))
+    _append_state_filter(element, node.state_filter)
+    return element
 
 
-def _gen_state_filter(node: RobotNode, indent: int) -> str:
-    """Return the <state-list> block, or '' if no state filter is set."""
-    sf = node.state_filter
-    if not sf or not sf.get('states'):
-        return ''
-    pad = TAB * indent
-    stype = sf.get('type', 'White')
-    lines = [f'{pad}<state-list type="{stype}">']
-    for s in sf['states']:
-        lines.append(f'{pad}{TAB}<state>{s}</state>')
-    lines.append(f'{pad}</state-list>')
-    return '\n'.join(lines)
+def _output_element(mode: str, filename: str, append: str, address: str):
+    if mode == 'socket':
+        return ET.Element('output', {'address': str(address)})
+    return ET.Element('output', {
+        'filename': str(filename), 'append': str(append),
+    })
 
 
-def _gen_leaf_event(node: RobotNode, indent: int) -> str:
-    pad = TAB * indent
-    sf = _gen_state_filter(node, indent + 1)
-    if sf:
-        return f'{pad}<event {_build_event_attrs(node)}>\n{sf}\n{pad}</event>'
-    return f'{pad}<event {_build_event_attrs(node)}/>'
-
-
-def _gen_touch_event(node: RobotNode, indent: int) -> str:
-    pad = TAB * indent
-    lines = [f'{pad}<event {_build_event_attrs(node)}>']
-    for pt in node.points:
-        lines.append(f'{pad}{TAB}<point x="{pt[0]}" y="{pt[1]}"/>')
-    sf = _gen_state_filter(node, indent + 1)
-    if sf:
-        lines.append(sf)
-    lines.append(f'{pad}</event>')
-    return '\n'.join(lines)
-
-
-def _gen_container_event(node: RobotNode, indent: int) -> str:
-    pad = TAB * indent
-    lines = [f'{pad}<event {_build_event_attrs(node)}>']
-    for child in node.children:
-        lines.append(_node_to_str(child, indent + 1))
-    sf = _gen_state_filter(node, indent + 1)
-    if sf:
-        lines.append(sf)
-    lines.append(f'{pad}</event>')
-    return '\n'.join(lines)
-
-
-def _gen_meter_list(node: RobotNode, indent: int) -> str:
-    pad = TAB * indent
+def _meter_list_element(node: RobotNode):
     mode = node.attrs.get('mode', 'periodic')
-    fname = node.attrs.get('output_filename', 'robotlogs/eventsfile.txt')
-    append = node.attrs.get('output_append', 'False')
-    meters = node.attrs.get('meters') or ALL_METERS
-
     if mode == 'state':
-        state    = node.attrs.get('state', 'Game-Idle')
-        on_leave = node.attrs.get('on_leave', 'False')
-        # only emit on-leave when True; False is the default and omitted
-        ol_attr  = ' on-leave="True"' if on_leave == 'True' else ''
-        open_tag = f'{pad}<meter-list state="{state}"{ol_attr}>'
+        attrs = {'state': str(node.attrs.get('state', 'Game-Idle'))}
+        if node.attrs.get('on_leave') == 'True':
+            attrs['on-leave'] = 'True'
     else:
-        timeout = node.attrs.get('timeout', '15')
-        units   = node.attrs.get('units', 'Seconds')
-        open_tag = f'{pad}<meter-list timeout="{timeout}" units="{units}">'
+        attrs = {
+            'timeout': str(node.attrs.get('timeout', '15')),
+            'units': str(node.attrs.get('units', 'Seconds')),
+        }
 
-    if node.attrs.get('output_mode') == 'socket':
-        output_line = f'{pad}{TAB}<output address="{node.attrs.get("output_address", "")}"/>'
-    else:
-        fname = node.attrs.get('output_filename', 'robotlogs/eventsfile.txt')
-        append = node.attrs.get('output_append', 'False')
-        output_line = f'{pad}{TAB}<output filename="{fname}" append="{append}"/>'
+    element = ET.Element('meter-list', attrs)
+    element.append(_output_element(
+        node.attrs.get('output_mode', 'file'),
+        node.attrs.get('output_filename', 'robotlogs/eventsfile.txt'),
+        node.attrs.get('output_append', 'False'),
+        node.attrs.get('output_address', ''),
+    ))
+    for meter in node.attrs.get('meters') or ALL_METERS:
+        ET.SubElement(element, 'meter').text = meter
+    return element
 
-    lines = [open_tag, output_line]
-    for m in meters:
-        lines.append(f'{pad}{TAB}<meter>{m}</meter>')
-    lines.append(f'{pad}</meter-list>')
-    return '\n'.join(lines)
+
+def _append_state_filter(element, state_filter: Optional[dict]):
+    if not state_filter or not state_filter.get('states'):
+        return
+    state_list = ET.SubElement(
+        element, 'state-list', {'type': str(state_filter.get('type', 'White'))}
+    )
+    for state in state_filter['states']:
+        ET.SubElement(state_list, 'state').text = str(state)
+
+
+def _indent(element, level: int = 0):
+    """Indent an ElementTree in place while retaining Python 3.8 support."""
+    whitespace = "\n" + TAB * level
+    if len(element):
+        if not element.text or not element.text.strip():
+            element.text = whitespace + TAB
+        for child in element:
+            _indent(child, level + 1)
+        if not child.tail or not child.tail.strip():
+            child.tail = whitespace
+    if level and (not element.tail or not element.tail.strip()):
+        element.tail = whitespace
 
 
 # ═══════════════════════════════════════
@@ -142,12 +120,8 @@ def _gen_meter_list(node: RobotNode, indent: int) -> str:
 # ═══════════════════════════════════════
 
 def parse_xml_file(filepath: str) -> RobotNode:
-    try:
-        parser = ET.XMLParser(target=ET.TreeBuilder(insert_comments=True))
-        tree = ET.parse(filepath, parser)
-    except TypeError:
-        # Python < 3.8 fallback (no insert_comments)
-        tree = ET.parse(filepath)
+    parser = ET.XMLParser(target=ET.TreeBuilder(insert_comments=True))
+    tree = ET.parse(filepath, parser)
     root = tree.getroot()
     node = _parse_element(root)
     if node is None:
@@ -207,33 +181,18 @@ def _parse_meter_list(elem) -> RobotNode:
 
 def _parse_event(elem) -> RobotNode:
     event_type = elem.get('type', 'Sequence')
-    node = RobotNode(node_type=event_type)
+    node = RobotNode.new(event_type)
+    node.points = []
     node.id = elem.get('id', '')
     raw_w = elem.get('weight')
     node.weight = int(raw_w) if raw_w is not None else None
 
-    # Type-specific attributes
-    if event_type == 'Button':
-        node.attrs['key'] = elem.get('key', 'Play')
-        node.attrs['value'] = elem.get('value', '') or ''
-    elif event_type == 'Wait':
-        node.attrs['timeout'] = elem.get('timeout', '3')
-        node.attrs['units'] = elem.get('units', '')   # '' = no units attr = milliseconds
-        node.attrs['state'] = elem.get('state', '')
-    elif event_type == 'Insert-Credit':
-        node.attrs['value'] = elem.get('value', '2048')
-        node.attrs['when_below'] = elem.get('when-below', '512')
-    elif event_type == 'Door':
-        node.attrs['door'] = elem.get('door', 'Logic')
-        node.attrs['open'] = elem.get('open', 'True')
-    elif event_type == 'Switch':
-        node.attrs['switch'] = elem.get('switch', '2')
-        node.attrs['off'] = elem.get('off', '')
-    elif event_type == 'Random-Credit':
-        node.attrs['range'] = elem.get('range', '100')
-    elif event_type == 'Scheduled':
-        node.attrs['timeout'] = elem.get('timeout', '60')
-        node.attrs['units'] = elem.get('units', 'Seconds')
+    for key in ATTR_ORDER.get(event_type, []):
+        xml_key = ATTR_KEY_MAP.get(key, key)
+        if xml_key in elem.attrib:
+            node.attrs[key] = elem.attrib[xml_key]
+    if event_type == 'Wait' and 'units' not in elem.attrib:
+        node.attrs['units'] = ''  # Missing units means milliseconds.
 
     # Parse children and points
     pending_comment = ""

@@ -134,7 +134,6 @@ class AsanReportTab(tk.Frame):
             master = tk.Tk()
             standalone = True
         super().__init__(master, bg=C_BG)
-        self._standalone = standalone
         self._closed = False
         self._request_id = 0
         self._records: List[dict] = []
