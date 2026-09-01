@@ -65,6 +65,7 @@ Some findings get confirmed as false positives directly by the project team in c
 |---|---|---|
 | `CONFIRMED-2026-08-31-1` | `AllocateMemory<SLOT_GLOBALS>`, `on_powerup_game_init` (any call site, not just `basexnull.cpp`) | 2026-08-31, chat, no ticket reference |
 | `CONFIRMED-2026-08-31-2` | `gos_getmem`, `_avlmalloc`, `CreateSysProp` (covers both `SetAvlDefaults` and `setup_dual_video_screens` call sites) | 2026-08-31, chat, no ticket reference |
+| `CONFIRMED-2026-09-01-1` | External-library-only stacks from `libvorbisfile.so`; do not suppress a stack that also enters project code | 2026-09-01, chat, no ticket reference |
 
 When a user confirms a new finding as a false positive in chat without a document to cite, add it here the same way: a new `CONFIRMED-<date>-<n>` entry in `PROJECT_CONFIRMED_RULES` with the identifying tokens and a note stating it's chat-confirmed with no ticket. Do not fold these into `BUILTIN_RULES` — that list's header claims PDF provenance and must stay accurate. Mention to the user that these ad-hoc confirmations should ideally be added to the real Confluence catalog so other engineers (and sessions without this chat's context) can see the same reasoning.
 
@@ -80,7 +81,7 @@ Read both scripts before relying on them if the report's format differs noticeab
 Rule design notes (also commented in `classify_leaks.py`):
 - A rule's `scope` matters: `"site"` requires the identifying tokens to be the actual allocation call frame, not merely an ancestor several frames up (e.g. `startup_task`/`startup.cpp` is the top-level boot dispatcher and is an ancestor of nearly everything that allocates at startup — matching it anywhere in the stack would over-suppress). `"any"` is for rules whose identifying names are specific enough that appearing anywhere in the stack is meaningful.
 - Matching all-but-one identifying token for a rule is reported as an **uncertain near-miss** (cites which token didn't match) rather than silently suppressed or silently ignored — this is what should happen for a rule like `TXL-6779` when the function names match but the file doesn't.
-- The `OZGAMEKBP-4254` external-library family match requires every frame past the interceptor to resolve into one of the named libraries (or be unresolved) with at least one frame actually naming a library — a fully-unresolved, unattributed stack is not silently suppressed, and a library name must match precisely (e.g. `libvorbis.so` must not also match the distinct `libvorbisfile.so`).
+- External-library family matches require every frame past the interceptor to resolve into the rule's named libraries (or be unresolved), with at least one frame actually naming a library. A fully-unresolved stack is not silently suppressed. `libvorbisfile.so` is covered by the separate chat-confirmed rule above rather than the PDF-derived `OZGAMEKBP-4254` rule.
 
 ## Procedure
 

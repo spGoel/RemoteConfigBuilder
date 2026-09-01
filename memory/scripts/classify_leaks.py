@@ -148,6 +148,10 @@ PROJECT_CONFIRMED_RULES = [
              "one-time AVL/video-screen default-property allocations made once per process via "
              "CreateSysProp/_avlmalloc/gos_getmem during startup (SetAvlDefaults and "
              "setup_dual_video_screens call sites), retained for process lifetime."},
+    {"id": "CONFIRMED-2026-09-01-1", "scope": "external",
+     "tokens": ["libvorbisfile.so"],
+     "note": "User-confirmed false positive (chat, 2026-09-01, no ticket/Confluence "
+             "reference given): suppress only external-library-only libvorbisfile stacks."},
 ]
 
 # OZGAMEKBP-4254 is structural rather than a token match: suppress when every
@@ -156,10 +160,8 @@ PROJECT_CONFIRMED_RULES = [
 # names one of them (so a fully-unknown, unattributed stack is NOT silently
 # suppressed -- that would be validity without evidence).
 #
-# NOTE: "libvorbis.so" (not bare "libvorbis") deliberately excludes the
-# distinct "libvorbisfile.so" module -- the catalog names libvorbis, not
-# libvorbisfile, and a bare substring match would silently over-suppress a
-# different library. Extend this list carefully for the same reason.
+# The PDF-derived list remains exact. libvorbisfile.so is handled separately
+# by the project-confirmed external-only rule above.
 EXTERNAL_FAMILY_RULE = {
     "id": "OZGAMEKBP-4254",
     "libs": ["libIrrlicht.so", "libvorbis.so", "libnvidia", "libogg"],
@@ -214,6 +216,9 @@ def match_rule(rule, frames):
     -- rather than silently either suppressing or ignoring it.
     """
     tokens = rule["tokens"]
+    if rule["scope"] == "external":
+        verdict = "exact" if is_external_family_match(frames, tokens) else None
+        return verdict, []
     site = frames[1] if len(frames) > 1 else ""
     whole = " | ".join(frames[1:])
     scope_text = site if rule["scope"] == "site" else whole
