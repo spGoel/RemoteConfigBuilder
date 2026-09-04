@@ -283,6 +283,10 @@ build_game_3L() {
 
     if $is_production; then
         make -s install-release
+    elif $enable_asan; then
+         make PROFILER=asan install
+    elif $enable_tcmalloc; then
+        make PROFILER=tcmalloc install-debug
     else
         $clean_build && make clean
         # Intentional double build (see build_platform_3L).
