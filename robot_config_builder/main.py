@@ -2,24 +2,44 @@
 Aristocrat Configurable Robot XML Builder
 Compose, edit, load and save robot.xml configuration files via a Windows GUI.
 Usage: python main.py
+
+UI is CustomTkinter; XML load/save, tree editing, snapshots, EGM upload and
+the email manager are unchanged from the plain-tkinter version.
 """
-import tkinter as tk
-from tkinter import ttk, filedialog, messagebox, scrolledtext
 import copy
 import datetime
 import json
 import sys
 import threading
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox
 from pathlib import Path
 from typing import Optional
 
-import snapshot_manager
-from coordinate_picker import ProgressDialog
-from email_dialog import EmailDialog
-from models import RobotNode
-import xml_io
-from tree_panel import TreePanel
-from properties_panel import PropertiesPanel
+# The shared style layer lives at the repository root; the tool's own
+# modules live next to this file.
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+_TOOL_DIR = Path(__file__).resolve().parent
+if str(_TOOL_DIR) not in sys.path:
+    sys.path.insert(0, str(_TOOL_DIR))
+
+import customtkinter as ctk  # noqa: E402
+
+from common import theme, widgets  # noqa: E402
+from common.widgets import Card, font  # noqa: E402
+
+import snapshot_manager  # noqa: E402
+from coordinate_picker import ProgressDialog  # noqa: E402
+from email_dialog import EmailDialog  # noqa: E402
+from models import RobotNode  # noqa: E402
+import xml_io  # noqa: E402
+from tree_panel import TreePanel  # noqa: E402
+from properties_panel import PropertiesPanel  # noqa: E402
+from ui_helpers import (  # noqa: E402
+    NEUTRAL, NEUTRAL_HOVER, PANED_STYLE, style_menu, style_panedwindow,
+)
 
 RECENT_FILE    = Path.home() / ".robot_config_builder_recent.json"
 MAX_RECENT     = 5
@@ -27,25 +47,31 @@ APP_TITLE      = "Robot Config Builder"
 DEFAULT_XML    = Path(__file__).parent / "default.xml"
 ROBOT_XML      = Path(__file__).parent / "robot.xml"
 TEMPLATES_DIR  = Path(__file__).parent / "templates"
-C_BG           = "#F3F0FA"
-C_SURFACE      = "#FFFFFF"
-C_ACCENT       = "#5B3EA6"
-C_TEXT         = "#1A1820"
+
+# Syntax colours for the XML preview. The preview is a fixed dark terminal
+# pane in both appearance modes (theme.LOG_BG), so these do not need pairs.
+_XML_TAG_FG     = "#569cd6"
+_XML_ATTR_FG    = "#9cdcfe"
+_XML_VALUE_FG   = "#ce9178"
+_XML_COMMENT_FG = "#6a9955"
 
 
-class App(tk.Frame):
+class App(ctk.CTkFrame):
     def __init__(self, master=None, standalone: bool = False):
         if master is None:
-            master = tk.Tk()
+            master = ctk.CTk()
+            ctk.set_appearance_mode("System")
+            ctk.set_default_color_theme("blue")
             standalone = True
-        super().__init__(master, bg=C_BG)
+        super().__init__(master, fg_color="transparent", corner_radius=0)
         self._standalone = standalone
         self._root_window = self.winfo_toplevel()
+        if not widgets.FONTS:
+            widgets.init_styles(self._root_window)
         self._menubar = None
+        self._menus: list = []        # every tk.Menu we own, for repainting
         if self._standalone:
             self._root_window.title(APP_TITLE)
-            self._root_window.geometry("1300x760")
-            self._root_window.minsize(900, 520)
 
         self.root_node: Optional[RobotNode] = None
         self.current_file: Optional[str] = None
@@ -57,12 +83,14 @@ class App(tk.Frame):
         self._bind_keys()
         if self._standalone:
             self.pack(fill=tk.BOTH, expand=True)
+            self._apply_initial_geometry()
         if not self._load_default():
             self.after(0, self._root_window.destroy if self._standalone else self.destroy)
 
     # ═══ UI Build ══════════════════════════════════════════════
 
     def _build_ui(self):
+        style_panedwindow(self)
         self._build_menu()
         self._build_toolbar()
         self._build_main_area()
@@ -71,36 +99,33 @@ class App(tk.Frame):
             self._root_window.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _build_menu(self):
+        # CustomTkinter has no menu widget. Standalone keeps the native
+        # window menubar; embedded in the launcher the same tk.Menus drop
+        # down from a row of flat CTk buttons.
         if self._standalone:
             menubar = tk.Menu(self._root_window)
             self._menubar = menubar
             self._root_window.configure(menu=menubar)
         else:
-            menubar = ttk.Frame(self, relief=tk.GROOVE)
-            menubar.pack(side=tk.TOP, fill=tk.X, padx=12, pady=(12, 2))
+            menubar = ctk.CTkFrame(self, fg_color="transparent")
+            menubar.pack(side=tk.TOP, fill=tk.X, padx=12, pady=(8, 2))
             self._menubar = None
 
         def menu(label: str) -> tk.Menu:
             if self._standalone:
                 m = tk.Menu(menubar, tearoff=0)
                 menubar.add_cascade(label=label, menu=m)
-                return m
-
-            btn = tk.Menubutton(
-                menubar,
-                text=label,
-                font=("Segoe UI", 9),
-                relief=tk.FLAT,
-                padx=12,
-                pady=4,
-                bg=C_SURFACE,
-                fg=C_TEXT,
-                activebackground="#E8E4F3",
-                activeforeground=C_ACCENT,
-            )
-            m = tk.Menu(btn, tearoff=0)
-            btn.configure(menu=m)
-            btn.pack(side=tk.LEFT, padx=(0, 2))
+            else:
+                m = tk.Menu(self, tearoff=0)
+                btn = ctk.CTkButton(
+                    menubar, text=label, width=max(len(label) * 8 + 20, 60), height=28,
+                    font=font("body"), fg_color="transparent", hover_color=theme.BORDER,
+                    text_color=theme.BODY_FG,
+                )
+                btn.configure(command=lambda mm=m, b=btn: self._popup_menu(mm, b))
+                btn.pack(side=tk.LEFT, padx=(0, 2))
+            style_menu(m)
+            self._menus.append(m)
             return m
 
         # File
@@ -114,6 +139,10 @@ class App(tk.Frame):
         fm.add_command(label="Save as Default",       command=self.action_save_as_default)
         fm.add_separator()
         fm.add_command(label="Exit",                  command=self._on_close)
+        # Recent files are inserted just before the separator that precedes
+        # "Exit"; record that index from the entries actually built above.
+        self._recent_block_start = fm.index(tk.END) - 1
+        self._recent_block_size = 0
         self._rebuild_recent_menu()
 
         # Edit
@@ -145,16 +174,29 @@ class App(tk.Frame):
         hm = menu("Help")
         hm.add_command(label="About", command=self._show_about)
 
+    def _popup_menu(self, menu: tk.Menu, anchor):
+        """Drop a tk.Menu down from the CTk button that owns it."""
+        x = anchor.winfo_rootx()
+        y = anchor.winfo_rooty() + anchor.winfo_height()
+        try:
+            menu.tk_popup(x, y)
+        finally:
+            menu.grab_release()
+
     def _build_toolbar(self):
-        tb = ttk.Frame(self, relief=tk.FLAT)
-        tb.pack(side=tk.TOP, fill=tk.X, padx=12, pady=(0, 8))
+        tb = ctk.CTkFrame(self, fg_color="transparent")
+        tb.pack(side=tk.TOP, fill=tk.X, padx=12, pady=(0, 6))
 
         def btn(text, cmd):
-            b = ttk.Button(tb, text=text, command=cmd, width=max(len(text) + 2, 7))
-            b.pack(side=tk.LEFT, padx=1)
+            ctk.CTkButton(
+                tb, text=text, command=cmd, height=30,
+                width=max(len(text) * 8 + 22, 64), font=font("body"),
+                fg_color=theme.ACCENT, hover_color=theme.ACCENT_HOVER,
+            ).pack(side=tk.LEFT, padx=2)
 
         def sep():
-            ttk.Separator(tb, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=4, pady=2)
+            ctk.CTkFrame(tb, width=1, height=24, corner_radius=0,
+                         fg_color=theme.BORDER).pack(side=tk.LEFT, padx=6, pady=3)
 
         btn("New",    self.action_new)
         btn("Open",   self.action_open)
@@ -180,31 +222,42 @@ class App(tk.Frame):
         self._machine_build_path_var = tk.StringVar(value=_s.get("build_path", ""))
         self._machine_status_var     = tk.StringVar(value="")
 
-        bar = ttk.Frame(self, relief=tk.GROOVE, borderwidth=1)
-        bar.pack(side=tk.TOP, fill=tk.X, padx=4, pady=(0, 2))
+        bar = ctk.CTkFrame(self, fg_color=theme.SUNKEN_BG, corner_radius=8)
+        bar.pack(side=tk.TOP, fill=tk.X, padx=12, pady=(0, 6))
 
-        ttk.Label(bar, text="Game Machine:", padding=(4, 0)).pack(side=tk.LEFT)
+        def label(text, **kw):
+            kw.setdefault("font", font("body"))
+            return ctk.CTkLabel(bar, text=text, anchor="w", **kw)
 
-        ttk.Label(bar, text="IP:").pack(side=tk.LEFT)
-        ttk.Entry(bar, textvariable=self._machine_ip_var, width=18).pack(
-            side=tk.LEFT, padx=(2, 8))
+        label("Game Machine:", font=font("heading")).pack(side=tk.LEFT, padx=(10, 8), pady=6)
 
-        ttk.Label(bar, text="Screen:").pack(side=tk.LEFT)
-        ttk.Combobox(
-            bar, textvariable=self._machine_or_var,
+        label("IP:").pack(side=tk.LEFT)
+        ctk.CTkEntry(bar, textvariable=self._machine_ip_var, width=150, height=28,
+                     font=font("body")).pack(side=tk.LEFT, padx=(4, 10), pady=6)
+
+        label("Screen:").pack(side=tk.LEFT)
+        ctk.CTkComboBox(
+            bar, variable=self._machine_or_var,
             values=["Portrait", "Landscape"],
-            state="readonly", width=11,
-        ).pack(side=tk.LEFT, padx=(2, 8))
+            state="readonly", width=130, height=28,
+            font=font("body"), dropdown_font=font("body"),
+            button_color=theme.ACCENT, button_hover_color=theme.ACCENT_HOVER,
+            border_color=theme.BORDER,
+        ).pack(side=tk.LEFT, padx=(4, 10), pady=6)
 
-        ttk.Label(bar, text="Build Path:").pack(side=tk.LEFT)
-        ttk.Entry(bar, textvariable=self._machine_build_path_var, width=28).pack(
-            side=tk.LEFT, padx=(2, 8))
+        label("Build Path:").pack(side=tk.LEFT)
+        ctk.CTkEntry(bar, textvariable=self._machine_build_path_var, width=240, height=28,
+                     font=font("body")).pack(side=tk.LEFT, padx=(4, 10), pady=6)
 
-        ttk.Button(bar, text="Refresh Screenshot",
-                   command=self._refresh_screenshot).pack(side=tk.LEFT)
+        ctk.CTkButton(
+            bar, text="Refresh Screenshot", command=self._refresh_screenshot,
+            width=150, height=28, font=font("body"),
+            fg_color=NEUTRAL, hover_color=NEUTRAL_HOVER, text_color=theme.BODY_FG,
+        ).pack(side=tk.LEFT, pady=6)
 
-        ttk.Label(bar, textvariable=self._machine_status_var,
-                  foreground="#666", padding=(8, 0)).pack(side=tk.LEFT)
+        ctk.CTkLabel(bar, textvariable=self._machine_status_var, anchor="w",
+                     font=font("small"), text_color=theme.MUTED_FG).pack(
+            side=tk.LEFT, padx=(10, 10))
 
         def _persist(*_):
             snapshot_manager.save_settings(
@@ -252,52 +305,94 @@ class App(tk.Frame):
         snapshot_manager.take_screenshot_async(ip, orientation, self, _done, _error)
 
     def _build_main_area(self):
-        paned = ttk.PanedWindow(self, orient=tk.HORIZONTAL)
-        paned.pack(fill=tk.BOTH, expand=True, padx=4, pady=(0, 2))
+        # CustomTkinter has no splitter; the ttk one stays, painted through
+        # a local style so it follows Light/Dark.
+        paned = ttk.PanedWindow(self, orient=tk.HORIZONTAL, style=PANED_STYLE)
+        paned.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 6))
+        self._paned = paned
 
         # Left pane — Event Tree
-        tree_frame = ttk.LabelFrame(paned, text="Event Tree")
+        tree_card = Card(paned, title="Event Tree")
         self.tree_panel = TreePanel(
-            tree_frame,
+            tree_card.body,
             on_node_selected=self._on_node_selected,
             on_tree_changed=self._on_tree_changed,
         )
         self.tree_panel._push_undo = self._push_undo
         self.tree_panel.pack(fill=tk.BOTH, expand=True)
-        paned.add(tree_frame, weight=1)
+        paned.add(tree_card, weight=1)
 
         # Center pane — Properties
-        props_frame = ttk.LabelFrame(paned, text="Properties")
+        props_card = Card(paned, title="Properties")
         self.props_panel = PropertiesPanel(
-            props_frame,
+            props_card.body,
             on_property_changed=self._on_property_changed,
         )
         self.props_panel.pack(fill=tk.BOTH, expand=True)
-        paned.add(props_frame, weight=2)
+        paned.add(props_card, weight=2)
 
-        # Right pane — XML Preview
-        xml_frame = ttk.LabelFrame(paned, text="XML Preview (read-only)")
-        self.xml_preview = scrolledtext.ScrolledText(
-            xml_frame,
-            wrap=tk.NONE,
-            font=("Courier New", 9),
-            state=tk.DISABLED,
-            bg="#1e1e1e",
-            fg="#d4d4d4",
-            insertbackground="#d4d4d4",
+        # Right pane — XML Preview (a terminal-style pane in both modes)
+        xml_card = Card(paned, title="XML Preview (read-only)")
+        self.xml_preview = ctk.CTkTextbox(
+            xml_card.body,
+            wrap="none",
+            font=font("mono"),
+            fg_color=theme.LOG_BG,
+            text_color=theme.LOG_FG,
+            corner_radius=8,
+            border_width=0,
+            state="disabled",
         )
         self.xml_preview.pack(fill=tk.BOTH, expand=True)
-        # Add horizontal scrollbar for wide XML lines
-        hsb = ttk.Scrollbar(xml_frame, orient=tk.HORIZONTAL,
-                             command=self.xml_preview.xview)
-        hsb.pack(side=tk.BOTTOM, fill=tk.X)
-        self.xml_preview.configure(xscrollcommand=hsb.set)
-        paned.add(xml_frame, weight=2)
+        paned.add(xml_card, weight=2)
 
     def _build_status_bar(self):
         self._status_var = tk.StringVar(value="  Ready — select a node or load a template")
-        ttk.Label(self, textvariable=self._status_var,
-                  relief=tk.SUNKEN, anchor=tk.W).pack(side=tk.BOTTOM, fill=tk.X)
+        bar = ctk.CTkFrame(self, fg_color=theme.SUNKEN_BG, corner_radius=0, height=28)
+        bar.pack(side=tk.BOTTOM, fill=tk.X)
+        ctk.CTkLabel(bar, textvariable=self._status_var, anchor="w",
+                     font=font("small"), text_color=theme.MUTED_FG).pack(
+            side=tk.LEFT, fill=tk.X, expand=True, padx=12, pady=4)
+
+    # ═══ Theme / geometry ══════════════════════════════════════
+
+    def on_appearance_change(self, mode: str = None):
+        """Called by the launcher after a Light/Dark switch.
+
+        CTk widgets repaint themselves; the ttk Treeview/PanedWindow and the
+        tk.Menus need to be told.
+        """
+        theme.style_treeview(self)
+        style_panedwindow(self)
+        for m in self._menus:
+            style_menu(m)
+        for panel in (self.tree_panel, self.props_panel):
+            hook = getattr(panel, "on_appearance_change", None)
+            if callable(hook):
+                hook(mode)
+
+    def _apply_initial_geometry(self):
+        """Standalone only: open maximised with a DPI-safe fallback size.
+
+        CustomTkinter multiplies geometry() by its scaling factor, so a fixed
+        size can open partly off-screen on a scaled display.
+        """
+        root = self._root_window
+        scaling = theme.widget_scaling(root)
+        screen_w = root.winfo_screenwidth() / scaling
+        screen_h = root.winfo_screenheight() / scaling
+        width = int(min(1300, screen_w * 0.9))
+        height = int(min(760, screen_h * 0.9))
+        root.geometry("{}x{}+{}+{}".format(
+            width, height,
+            max(0, int((screen_w - width) / 2)),
+            max(0, int((screen_h - height) / 2)),
+        ))
+        root.minsize(int(min(900, screen_w * 0.6)), int(min(520, screen_h * 0.6)))
+        try:
+            root.state("zoomed")
+        except tk.TclError:
+            pass
 
     # ═══ Key bindings ══════════════════════════════════════════
 
@@ -518,22 +613,22 @@ class App(tk.Frame):
             xml_text = xml_io.generate_xml(self.root_node)
         except Exception as exc:
             xml_text = f"<!-- Error generating XML:\n{exc} -->"
-        self.xml_preview.configure(state=tk.NORMAL)
+        self.xml_preview.configure(state="normal")
         self.xml_preview.delete("1.0", tk.END)
         self.xml_preview.insert("1.0", xml_text)
         self._apply_xml_highlight()
-        self.xml_preview.configure(state=tk.DISABLED)
+        self.xml_preview.configure(state="disabled")
 
     def _apply_xml_highlight(self):
         """Basic syntax highlighting on the XML preview."""
         import re
         txt = self.xml_preview
 
-        # Tags
-        txt.tag_configure('tag',     foreground='#569cd6')
-        txt.tag_configure('attr',    foreground='#9cdcfe')
-        txt.tag_configure('value',   foreground='#ce9178')
-        txt.tag_configure('comment', foreground='#6a9955')
+        # Tags (CTkTextbox exposes tag_config, not tag_configure)
+        txt.tag_config('tag',     foreground=_XML_TAG_FG)
+        txt.tag_config('attr',    foreground=_XML_ATTR_FG)
+        txt.tag_config('value',   foreground=_XML_VALUE_FG)
+        txt.tag_config('comment', foreground=_XML_COMMENT_FG)
 
         content = txt.get("1.0", tk.END)
 
@@ -682,7 +777,7 @@ class App(tk.Frame):
             "Aristocrat Configurable Robot test framework.\n\n"
             "Based on Confluence documentation and 18 sample XML files\n"
             "from the IDEA_ConfiguableRobot folder.\n\n"
-            "Technology: Python + tkinter (no extra dependencies)",
+            "Technology: Python + CustomTkinter",
         )
 
     # ═══ Recent Files ══════════════════════════════════════════
@@ -710,22 +805,23 @@ class App(tk.Frame):
         self._rebuild_recent_menu()
 
     def _rebuild_recent_menu(self):
-        # The fixed entries occupy indices 0-6 (New, Open, sep, Save, SaveAs, sep, Exit).
-        # Remove everything after index 6, then re-add recent block if any.
-        try:
-            last = self._file_menu.index(tk.END)
-            if last is not None and last > 6:
-                self._file_menu.delete(7, tk.END)
-        except (tk.TclError, TypeError):
-            pass
+        # Replace the recent block (separator + entries) that sits between the
+        # fixed entries and the trailing separator/"Exit". Its position was
+        # recorded when the File menu was built, so Exit always survives.
+        fm = self._file_menu
+        start = self._recent_block_start
+        if self._recent_block_size:
+            fm.delete(start, start + self._recent_block_size - 1)
+            self._recent_block_size = 0
         if self._recent:
-            self._file_menu.add_separator()
-            for p in self._recent:
-                name = Path(p).name
-                self._file_menu.add_command(
-                    label=f"  {name}",
+            fm.insert_separator(start)
+            for i, p in enumerate(self._recent, start=1):
+                fm.insert_command(
+                    start + i,
+                    label=f"  {Path(p).name}",
                     command=lambda fp=p: self._open_recent(fp),
                 )
+            self._recent_block_size = 1 + len(self._recent)
 
     def _open_recent(self, path: str):
         if not Path(path).exists():

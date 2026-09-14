@@ -1,4 +1,10 @@
-"""Standalone live and historical charts for Robot meter streams."""
+"""Standalone live and historical charts for Robot meter streams.
+
+UI is CustomTkinter; the live TCP meter server, the SQLite history store,
+CSV reading and every polling/timer path are unchanged from the plain-tkinter
+version. The two charts stay on tk.Canvas (CustomTkinter has none) and are
+repainted from theme colour pairs so Light/Dark both read correctly.
+"""
 
 from __future__ import annotations
 
@@ -11,37 +17,55 @@ import queue
 import shlex
 import socket
 import sqlite3
+import sys
 import tempfile
 import threading
 import time
 import tkinter as tk
 from datetime import datetime
 from pathlib import Path
-from tkinter import filedialog, ttk
+from tkinter import filedialog
 from typing import Dict, Iterable, List, Optional, Tuple
+
+# The shared style layer lives at the repository root.
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+import customtkinter as ctk  # noqa: E402
+
+from common import theme, widgets  # noqa: E402
+from common.widgets import Banner, font  # noqa: E402
 
 try:
     from meter_reader import ALL_METERS, read_all_meters
+    from ctk_spinbox import NumberSpin
 except ImportError:  # Package-style import, useful for tests and reuse.
     from .meter_reader import ALL_METERS, read_all_meters
+    from .ctk_spinbox import NumberSpin
 
 
-C_BG = "#F3F0FA"
-C_SURFACE = "#FFFFFF"
-C_TEXT = "#1A1820"
-C_MUTED = "#5C5870"
-C_ACCENT = "#5B3EA6"
-C_GRID = "#DDD9E8"
-C_AXIS = "#8A859A"
+# ── Chart palette — (light, dark) pairs resolved with theme.pick() ────────────
+CHART_BG = ("#FFFFFF", "#1B1B26")
+CHART_GRID = ("#DDD9E8", "#33334A")
+CHART_AXIS = ("#8A859A", "#8E8AA6")
+CHART_TEXT = ("#5C5870", "#B4B0C8")
+CHART_LIVE = theme.ACCENT
+PANE_BG = theme.BORDER  # the sash between chart and legend
 
-# A fixed, high-contrast color per meter. The order matches Robot/Types.h.
+# A fixed, high-contrast colour per meter, as (light, dark) so the pale ones
+# stay legible on white and the dark ones on the dark ground. The order
+# matches Robot/Types.h.
 METER_COLORS = {
     meter: color for meter, color in zip(ALL_METERS, [
-        "#E6194B", "#3CB44B", "#4363D8", "#F58231", "#911EB4",
-        "#42D4F4", "#F032E6", "#BFEF45", "#FABED4", "#469990",
-        "#DCBEFF", "#9A6324", "#800000", "#AAFFC3", "#808000",
-        "#FFD8B1", "#000075", "#A9A9A9", "#1F77B4", "#FF7F0E",
-        "#2CA02C", "#D62728",
+        ("#E6194B", "#FF5C7A"), ("#3CB44B", "#5DD66C"), ("#4363D8", "#7A93FF"),
+        ("#F58231", "#FFA25C"), ("#911EB4", "#C77DFF"), ("#1FA9C9", "#5EE6FF"),
+        ("#F032E6", "#FF7BF2"), ("#7FA800", "#BFEF45"), ("#D8548A", "#FABED4"),
+        ("#469990", "#5FC8BC"), ("#8F5BD6", "#DCBEFF"), ("#9A6324", "#D9A066"),
+        ("#800000", "#E86A5A"), ("#2E9E5B", "#AAFFC3"), ("#808000", "#C8C83C"),
+        ("#C97A2B", "#FFD8B1"), ("#000075", "#8A8AFF"), ("#7A7A7A", "#BFBFBF"),
+        ("#1F77B4", "#5AAEE8"), ("#FF7F0E", "#FFA347"), ("#2CA02C", "#63D463"),
+        ("#D62728", "#F26E6E"),
     ])
 }
 
@@ -55,6 +79,8 @@ RANGE_OPTIONS = {
     "All history": None,
 }
 
+SOURCE_MODES = ["Local file", "Remote EGM", "Live TCP"]
+
 DATA_DIR = Path.home() / ".robot_memory_profiler"
 SETTINGS_FILE = DATA_DIR / "settings.json"
 DEFAULT_HISTORY_DB = Path(
@@ -63,6 +89,9 @@ DEFAULT_HISTORY_DB = Path(
         str(DATA_DIR / "history.sqlite3"),
     )
 )
+
+_NEUTRAL = ("gray70", "gray35")
+_NEUTRAL_HOVER = ("gray60", "gray45")
 
 
 def _load_settings() -> dict:
@@ -441,22 +470,28 @@ class MeterHistoryStore:
         self._connection.close()
 
 
-class MemoryProfilingTab(tk.Frame):
-    """Tkinter tab that charts live and persisted Robot meter history."""
+class MemoryProfilingTab(ctk.CTkFrame):
+    """CustomTkinter tab that charts live and persisted Robot meter history."""
 
-    def __init__(self, master=None, standalone: bool = False):
+    def __init__(self, master=None, standalone: bool = False, history_db=None):
         if master is None:
-            master = tk.Tk()
+            master = ctk.CTk()
+            ctk.set_appearance_mode("System")
+            ctk.set_default_color_theme("blue")
             standalone = True
-        super().__init__(master, bg=C_BG)
+        super().__init__(master, fg_color="transparent", corner_radius=0)
+        self._standalone = standalone
         self._root_window = self.winfo_toplevel()
+        if not widgets.FONTS:
+            widgets.init_styles(self._root_window)
         if standalone:
             self._root_window.title("Robot Memory Profiler")
-            self._root_window.geometry("1320x780")
-            self.pack(fill=tk.BOTH, expand=True)
 
-        self._history = MeterHistoryStore()
+        self._history = MeterHistoryStore(
+            Path(history_db) if history_db is not None else DEFAULT_HISTORY_DB
+        )
         self._closed = False
+        self._start_job = None
         self._poll_job = None
         self._redraw_job = None
         self._running = False
@@ -476,11 +511,11 @@ class MemoryProfilingTab(tk.Frame):
         self._meter_vars = {
             meter: tk.BooleanVar(self, value=True) for meter in ALL_METERS
         }
-        self._value_labels: Dict[str, tk.Label] = {}
+        self._value_labels: Dict[str, ctk.CTkLabel] = {}
 
         profiler_settings = _load_settings()
         source_mode = profiler_settings.get("source_mode", "Local file")
-        if source_mode not in {"Local file", "Remote EGM", "Live TCP"}:
+        if source_mode not in set(SOURCE_MODES):
             source_mode = "Local file"
         self._source_mode_var = tk.StringVar(value=source_mode)
         self._csv_path_var = tk.StringVar(
@@ -508,178 +543,258 @@ class MemoryProfilingTab(tk.Frame):
             variable.trace_add("write", self._save_settings)
         self._build_ui()
         self.bind("<Destroy>", self._on_destroy, add="+")
-        self.after(250, self.start)
+        if standalone:
+            self.pack(fill=tk.BOTH, expand=True)
+            self._apply_initial_geometry()
+        self._start_job = self.after(250, self.start)
+
+    # ── UI ────────────────────────────────────────────────────────────────────
+
+    def _label(self, parent, text: str, muted: bool = False, **kwargs) -> ctk.CTkLabel:
+        kwargs.setdefault("anchor", "w")
+        kwargs.setdefault("font", font("body"))
+        if muted:
+            kwargs.setdefault("text_color", theme.MUTED_FG)
+        return ctk.CTkLabel(parent, text=text, **kwargs)
+
+    def _button(self, parent, text: str, command, primary: bool = False,
+                width: int = 90) -> ctk.CTkButton:
+        if primary:
+            colours = dict(fg_color=theme.ACCENT, hover_color=theme.ACCENT_HOVER)
+        else:
+            colours = dict(
+                fg_color=_NEUTRAL, hover_color=_NEUTRAL_HOVER, text_color=theme.BODY_FG
+            )
+        return ctk.CTkButton(
+            parent, text=text, command=command, width=width, height=30,
+            font=font("body"), **colours,
+        )
+
+    def _combo(self, parent, variable: tk.StringVar, values: list, width: int,
+               command=None) -> ctk.CTkComboBox:
+        return ctk.CTkComboBox(
+            parent, variable=variable, values=values, state="readonly",
+            width=width, height=30, font=font("body"), dropdown_font=font("body"),
+            button_color=theme.ACCENT, button_hover_color=theme.ACCENT_HOVER,
+            border_color=theme.BORDER, command=command,
+        )
 
     def _build_ui(self):
-        controls = tk.Frame(self, bg=C_SURFACE, padx=12, pady=9)
-        controls.pack(fill=tk.X, padx=10, pady=(10, 6))
+        pad = 12 if self._standalone else 8
+        self._scale = theme.widget_scaling(self)
 
-        tk.Label(controls, text="Source:", bg=C_SURFACE, fg=C_TEXT).grid(
-            row=0, column=0, sticky="w"
-        )
-        source_box = ttk.Combobox(
-            controls, textvariable=self._source_mode_var,
-            values=["Local file", "Remote EGM", "Live TCP"],
-            state="readonly", width=12,
-        )
-        source_box.grid(row=0, column=1, sticky="w", padx=(5, 12))
-        source_box.bind("<<ComboboxSelected>>", self._source_changed)
+        # ── Source / polling controls ────────────────────────────────────────
+        controls_card = ctk.CTkFrame(self, fg_color=theme.CARD_BG, corner_radius=10)
+        controls_card.pack(fill=tk.X, padx=pad, pady=(pad, 6))
+        controls = ctk.CTkFrame(controls_card, fg_color="transparent")
+        controls.pack(fill=tk.X, padx=12, pady=9)
 
-        self._local_fields = tk.Frame(controls, bg=C_SURFACE)
+        self._label(controls, "Source:").grid(row=0, column=0, sticky="w")
+        self._source_box = self._combo(
+            controls, self._source_mode_var, SOURCE_MODES, width=130,
+            command=lambda _value: self._source_changed(),
+        )
+        self._source_box.grid(row=0, column=1, sticky="w", padx=(5, 12))
+
+        self._local_fields = ctk.CTkFrame(controls, fg_color="transparent")
         self._local_fields.grid(row=0, column=2, columnspan=5, sticky="ew")
-        tk.Label(
-            self._local_fields, text="Meter CSV:", bg=C_SURFACE, fg=C_TEXT,
-        ).pack(side=tk.LEFT)
-        ttk.Entry(
-            self._local_fields, textvariable=self._csv_path_var, width=62,
+        self._label(self._local_fields, "Meter CSV:").pack(side=tk.LEFT)
+        ctk.CTkEntry(
+            self._local_fields, textvariable=self._csv_path_var, height=30,
+            font=font("body"),
         ).pack(side=tk.LEFT, padx=(5, 4), fill=tk.X, expand=True)
-        ttk.Button(
-            self._local_fields, text="Browse…", command=self._browse_csv,
-        ).pack(side=tk.LEFT)
-
-        self._remote_fields = tk.Frame(controls, bg=C_SURFACE)
-        tk.Label(self._remote_fields, text="IP:", bg=C_SURFACE, fg=C_TEXT).pack(side=tk.LEFT)
-        ttk.Entry(self._remote_fields, textvariable=self._ip_var, width=17).pack(
-            side=tk.LEFT, padx=(4, 10)
+        self._button(self._local_fields, "Browse…", self._browse_csv, width=84).pack(
+            side=tk.LEFT
         )
-        tk.Label(
-            self._remote_fields, text="CSV path or build root:",
-            bg=C_SURFACE, fg=C_TEXT,
-        ).pack(side=tk.LEFT)
-        ttk.Entry(
-            self._remote_fields, textvariable=self._remote_path_var, width=55,
+
+        self._remote_fields = ctk.CTkFrame(controls, fg_color="transparent")
+        self._label(self._remote_fields, "IP:").pack(side=tk.LEFT)
+        ctk.CTkEntry(
+            self._remote_fields, textvariable=self._ip_var, width=150, height=30,
+            font=font("body"),
+        ).pack(side=tk.LEFT, padx=(4, 10))
+        self._label(self._remote_fields, "CSV path or build root:").pack(side=tk.LEFT)
+        ctk.CTkEntry(
+            self._remote_fields, textvariable=self._remote_path_var, height=30,
+            font=font("body"),
         ).pack(side=tk.LEFT, padx=(4, 0), fill=tk.X, expand=True)
 
-        self._tcp_fields = tk.Frame(controls, bg=C_SURFACE)
-        tk.Label(
-            self._tcp_fields, text="Listen IP:", bg=C_SURFACE, fg=C_TEXT,
-        ).pack(side=tk.LEFT)
-        ttk.Entry(
-            self._tcp_fields, textvariable=self._listen_ip_var, width=17,
+        self._tcp_fields = ctk.CTkFrame(controls, fg_color="transparent")
+        self._label(self._tcp_fields, "Listen IP:").pack(side=tk.LEFT)
+        ctk.CTkEntry(
+            self._tcp_fields, textvariable=self._listen_ip_var, width=150, height=30,
+            font=font("body"),
         ).pack(side=tk.LEFT, padx=(4, 10))
-        tk.Label(
-            self._tcp_fields, text="Port:", bg=C_SURFACE, fg=C_TEXT,
-        ).pack(side=tk.LEFT)
-        ttk.Entry(
-            self._tcp_fields, textvariable=self._listen_port_var, width=7,
+        self._label(self._tcp_fields, "Port:").pack(side=tk.LEFT)
+        ctk.CTkEntry(
+            self._tcp_fields, textvariable=self._listen_port_var, width=72, height=30,
+            font=font("body"),
         ).pack(side=tk.LEFT, padx=(4, 0))
 
-        tk.Label(controls, text="Poll (sec):", bg=C_SURFACE, fg=C_TEXT).grid(
-            row=1, column=0, sticky="w", pady=(8, 0)
-        )
-        ttk.Spinbox(
-            controls, from_=0.5, to=60, increment=0.5,
-            textvariable=self._interval_var, width=6,
+        self._label(controls, "Poll (sec):").grid(row=1, column=0, sticky="w", pady=(8, 0))
+        NumberSpin(
+            controls, self._interval_var, from_=0.5, to=60, increment=0.5, width=60,
         ).grid(row=1, column=1, sticky="w", padx=(5, 12), pady=(8, 0))
-        self._start_button = ttk.Button(controls, text="Start", command=self._toggle_running)
+        self._start_button = self._button(
+            controls, "Start", self._toggle_running, primary=True, width=90
+        )
         self._start_button.grid(row=1, column=2, sticky="w", pady=(8, 0))
-        ttk.Button(controls, text="Refresh", command=self._force_refresh).grid(
+        self._button(controls, "Refresh", self._force_refresh, width=90).grid(
             row=1, column=3, sticky="w", padx=(4, 0), pady=(8, 0)
         )
-        self._source_hint_var = tk.StringVar()
-        tk.Label(
-            controls,
-            textvariable=self._source_hint_var,
-            bg=C_SURFACE, fg=C_MUTED,
-        ).grid(row=1, column=4, columnspan=3, sticky="w", padx=(12, 0), pady=(8, 0))
+        self._source_hint = Banner(controls, colour=theme.MUTED_FG, font=font("body"))
+        self._source_hint.grid(
+            row=1, column=4, columnspan=3, sticky="w", padx=(12, 0), pady=(8, 0)
+        )
         controls.grid_columnconfigure(4, weight=1)
         self._source_changed()
 
-        nav = tk.Frame(self, bg=C_SURFACE, padx=12, pady=7)
-        nav.pack(fill=tk.X, padx=10, pady=(0, 6))
-        tk.Label(nav, text="Visible range:", bg=C_SURFACE, fg=C_TEXT).pack(side=tk.LEFT)
-        range_box = ttk.Combobox(
-            nav, textvariable=self._range_var, values=list(RANGE_OPTIONS),
-            width=14, state="readonly",
+        # ── Range navigation ─────────────────────────────────────────────────
+        nav_card = ctk.CTkFrame(self, fg_color=theme.CARD_BG, corner_radius=10)
+        nav_card.pack(fill=tk.X, padx=pad, pady=(0, 6))
+        nav = ctk.CTkFrame(nav_card, fg_color="transparent")
+        nav.pack(fill=tk.X, padx=12, pady=7)
+        self._label(nav, "Visible range:").pack(side=tk.LEFT)
+        self._range_box = self._combo(
+            nav, self._range_var, list(RANGE_OPTIONS), width=140,
+            command=lambda _value: self._draw_chart(),
         )
-        range_box.pack(side=tk.LEFT, padx=(5, 12))
-        range_box.bind("<<ComboboxSelected>>", lambda _event: self._draw_chart())
-        ttk.Button(nav, text="◀ Earlier", command=lambda: self._pan(-1)).pack(side=tk.LEFT)
-        ttk.Button(nav, text="Later ▶", command=lambda: self._pan(1)).pack(side=tk.LEFT, padx=4)
-        ttk.Button(nav, text="Zoom +", command=lambda: self._zoom(0.5)).pack(side=tk.LEFT, padx=(8, 2))
-        ttk.Button(nav, text="Zoom −", command=lambda: self._zoom(2.0)).pack(side=tk.LEFT)
-        ttk.Button(nav, text="Live", command=self._go_live).pack(side=tk.LEFT, padx=(8, 0))
-        tk.Label(
-            nav, textvariable=self._status_var, bg=C_SURFACE, fg=C_MUTED,
-            anchor="e",
+        self._range_box.pack(side=tk.LEFT, padx=(5, 12))
+        self._button(nav, "◀ Earlier", lambda: self._pan(-1)).pack(side=tk.LEFT)
+        self._button(nav, "Later ▶", lambda: self._pan(1)).pack(side=tk.LEFT, padx=4)
+        self._button(nav, "Zoom +", lambda: self._zoom(0.5), width=80).pack(
+            side=tk.LEFT, padx=(8, 2)
+        )
+        self._button(nav, "Zoom −", lambda: self._zoom(2.0), width=80).pack(side=tk.LEFT)
+        self._button(nav, "Live", self._go_live, primary=True, width=70).pack(
+            side=tk.LEFT, padx=(8, 0)
+        )
+        ctk.CTkLabel(
+            nav, textvariable=self._status_var, font=font("small"),
+            text_color=theme.MUTED_FG, anchor="e",
         ).pack(side=tk.RIGHT, fill=tk.X, expand=True, padx=(12, 0))
 
+        # ── Chart + legend (tk.PanedWindow: CTk has no split pane) ───────────
         body = tk.PanedWindow(
-            self, orient=tk.HORIZONTAL, bg=C_BG, sashwidth=5,
-            sashrelief=tk.FLAT, bd=0,
+            self, orient=tk.HORIZONTAL, bg=theme.pick(PANE_BG),
+            sashwidth=self._px(5), sashrelief=tk.FLAT, bd=0,
         )
-        body.pack(fill=tk.BOTH, expand=True, padx=10)
+        body.pack(fill=tk.BOTH, expand=True, padx=pad)
+        self._body = body
 
-        chart_panel = tk.Frame(body, bg=C_SURFACE)
-        body.add(chart_panel, stretch="always", minsize=500)
+        self._chart_panel = ctk.CTkFrame(body, fg_color=theme.CARD_BG, corner_radius=0)
+        body.add(self._chart_panel, stretch="always", minsize=self._px(400))
         self._chart = tk.Canvas(
-            chart_panel, bg=C_SURFACE, highlightthickness=1,
-            highlightbackground=C_GRID,
+            self._chart_panel, bg=theme.pick(CHART_BG), highlightthickness=1,
+            highlightbackground=theme.pick(CHART_GRID), bd=0,
         )
-        self._chart.pack(fill=tk.BOTH, expand=True)
+        self._chart.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
         self._chart.bind("<Configure>", self._schedule_redraw)
 
-        legend_panel = tk.Frame(body, bg=C_SURFACE, width=330)
-        body.add(legend_panel, minsize=280)
-        legend_header = tk.Frame(legend_panel, bg=C_SURFACE, padx=8, pady=8)
-        legend_header.pack(fill=tk.X)
-        tk.Label(
-            legend_header, text="Meter", font=("Segoe UI", 10, "bold"),
-            bg=C_SURFACE, fg=C_TEXT,
-        ).pack(side=tk.LEFT)
-        ttk.Button(legend_header, text="All", width=5, command=self._select_all).pack(side=tk.RIGHT)
-        ttk.Button(legend_header, text="None", width=5, command=self._select_none).pack(
+        self._legend_panel = ctk.CTkFrame(body, fg_color=theme.CARD_BG, corner_radius=0)
+        body.add(self._legend_panel, minsize=self._px(260), width=self._px(330))
+        legend_header = ctk.CTkFrame(self._legend_panel, fg_color="transparent")
+        legend_header.pack(fill=tk.X, padx=8, pady=8)
+        ctk.CTkLabel(legend_header, text="Meter", font=font("heading"), anchor="w").pack(
+            side=tk.LEFT
+        )
+        self._button(legend_header, "All", self._select_all, width=52).pack(side=tk.RIGHT)
+        self._button(legend_header, "None", self._select_none, width=58).pack(
             side=tk.RIGHT, padx=3
         )
-        self._build_scrollable_legend(legend_panel)
+        self._build_scrollable_legend(self._legend_panel)
 
-        timeline = tk.Frame(self, bg=C_BG)
-        timeline.pack(fill=tk.X, padx=10, pady=(5, 8))
-        tk.Label(timeline, text="History", bg=C_BG, fg=C_MUTED).pack(side=tk.LEFT)
-        self._timeline = ttk.Scale(
+        # ── History timeline ─────────────────────────────────────────────────
+        timeline = ctk.CTkFrame(self, fg_color="transparent")
+        timeline.pack(fill=tk.X, padx=pad, pady=(5, pad))
+        self._label(timeline, "History", muted=True).pack(side=tk.LEFT)
+        self._timeline = ctk.CTkSlider(
             timeline, variable=self._timeline_var, from_=0, to=1,
-            command=self._timeline_changed,
+            command=self._timeline_changed, height=18,
+            button_color=theme.ACCENT, button_hover_color=theme.ACCENT_HOVER,
+            progress_color=theme.ACCENT, fg_color=theme.BORDER,
         )
         self._timeline.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=8)
-        self._time_label = tk.Label(timeline, text="No history", bg=C_BG, fg=C_MUTED, width=34)
+        self._time_label = ctk.CTkLabel(
+            timeline, text="No history", font=font("small"),
+            text_color=theme.MUTED_FG, anchor="e", width=260,
+        )
         self._time_label.pack(side=tk.RIGHT)
 
     def _build_scrollable_legend(self, parent):
-        holder = tk.Frame(parent, bg=C_SURFACE)
-        holder.pack(fill=tk.BOTH, expand=True)
-        canvas = tk.Canvas(holder, bg=C_SURFACE, highlightthickness=0, width=320)
-        scrollbar = ttk.Scrollbar(holder, orient=tk.VERTICAL, command=canvas.yview)
-        inner = tk.Frame(canvas, bg=C_SURFACE)
-        window = canvas.create_window((0, 0), window=inner, anchor=tk.NW)
-        canvas.configure(yscrollcommand=scrollbar.set)
-        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        inner.bind(
-            "<Configure>",
-            lambda _event: canvas.configure(scrollregion=canvas.bbox("all")),
-        )
-        canvas.bind("<Configure>", lambda event: canvas.itemconfigure(window, width=event.width))
+        inner = ctk.CTkScrollableFrame(parent, fg_color="transparent")
+        inner.pack(fill=tk.BOTH, expand=True, padx=(4, 0), pady=(0, 6))
+        self._legend_rows = inner
 
         for meter in ALL_METERS:
-            row = tk.Frame(inner, bg=C_SURFACE, padx=5, pady=2)
-            row.pack(fill=tk.X)
-            ttk.Checkbutton(
-                row, variable=self._meter_vars[meter], command=self._draw_chart,
+            row = ctk.CTkFrame(inner, fg_color="transparent")
+            row.pack(fill=tk.X, padx=4, pady=1)
+            ctk.CTkCheckBox(
+                row, text="", width=24, variable=self._meter_vars[meter],
+                command=self._draw_chart, checkbox_width=20, checkbox_height=20,
+                fg_color=theme.ACCENT, hover_color=theme.ACCENT_HOVER,
             ).pack(side=tk.LEFT)
-            tk.Label(
-                row, text="━", font=("Segoe UI", 14, "bold"),
-                bg=C_SURFACE, fg=METER_COLORS[meter], width=2,
+            ctk.CTkLabel(
+                row, text="━", font=font("info"), width=24,
+                text_color=METER_COLORS[meter],
             ).pack(side=tk.LEFT)
-            tk.Label(
-                row, text=meter, bg=C_SURFACE, fg=C_TEXT,
-                anchor="w", width=22,
+            ctk.CTkLabel(
+                row, text=meter, font=font("body"), anchor="w", width=150,
             ).pack(side=tk.LEFT)
-            value_label = tk.Label(
-                row, text="—", bg=C_SURFACE, fg=C_MUTED,
-                anchor="e", font=("Consolas", 9),
+            value_label = ctk.CTkLabel(
+                row, text="—", font=font("mono_small"), anchor="e",
+                text_color=theme.MUTED_FG,
             )
             value_label.pack(side=tk.RIGHT, fill=tk.X, expand=True)
             self._value_labels[meter] = value_label
+
+    def _px(self, size: float) -> int:
+        """Scale a raw pixel size tuned for 1x to this display (tk widgets only)."""
+        return max(1, int(round(size * self._scale)))
+
+    def _apply_initial_geometry(self):
+        """Standalone only: open maximised with a DPI-safe fallback size.
+
+        CustomTkinter multiplies geometry() by its scaling factor, so a fixed
+        size can open partly off-screen on a scaled display.
+        """
+        root = self._root_window
+        scaling = theme.widget_scaling(root)
+        screen_w = root.winfo_screenwidth() / scaling
+        screen_h = root.winfo_screenheight() / scaling
+        width = int(min(1320, screen_w * 0.9))
+        height = int(min(780, screen_h * 0.9))
+        root.geometry("{}x{}+{}+{}".format(
+            width, height,
+            max(0, int((screen_w - width) / 2)),
+            max(0, int((screen_h - height) / 2)),
+        ))
+        root.minsize(int(min(900, screen_w * 0.6)), int(min(600, screen_h * 0.6)))
+        try:
+            root.state("zoomed")
+        except tk.TclError:
+            pass
+
+    def on_appearance_change(self, _mode: str):
+        """Called by the launcher after a Light/Dark switch.
+
+        CTk widgets repaint themselves; the tk.Canvas chart and the
+        tk.PanedWindow sash keep whatever colour they were given, so they are
+        re-resolved here and the chart is redrawn in the new palette.
+        """
+        self._apply_chart_colours()
+        self._draw_chart()
+
+    def _apply_chart_colours(self):
+        self._chart.configure(
+            bg=theme.pick(CHART_BG), highlightbackground=theme.pick(CHART_GRID)
+        )
+        self._body.configure(bg=theme.pick(PANE_BG))
+        # The pane frames sit on a plain tk parent and cached its light colour.
+        for panel in (self._chart_panel, self._legend_panel):
+            panel.configure(bg_color=theme.pick(PANE_BG))
+
+    # ── Settings / source handling ────────────────────────────────────────────
 
     def _browse_csv(self):
         path = filedialog.askopenfilename(
@@ -718,19 +833,19 @@ class MemoryProfilingTab(tk.Frame):
             self._local_fields.grid_remove()
             self._tcp_fields.grid_remove()
             self._remote_fields.grid(row=0, column=2, columnspan=5, sticky="ew")
-            self._source_hint_var.set(
+            self._source_hint.show(
                 "Remote login uses the configured EGM account (mk7/mk7)"
             )
         elif mode == "Live TCP":
             self._local_fields.grid_remove()
             self._remote_fields.grid_remove()
             self._tcp_fields.grid(row=0, column=2, columnspan=5, sticky="ew")
-            self._source_hint_var.set("Configure Robot output to this PC and port")
+            self._source_hint.show("Configure Robot output to this PC and port")
         else:
             self._remote_fields.grid_remove()
             self._tcp_fields.grid_remove()
             self._local_fields.grid(row=0, column=2, columnspan=5, sticky="ew")
-            self._source_hint_var.set("")
+            self._source_hint.show("")
         self._last_file_signature = None
         self._last_remote_signature = None
         self._remote_request_id += 1
@@ -752,11 +867,14 @@ class MemoryProfilingTab(tk.Frame):
         value = self._csv_path_var.get().strip()
         return Path(value) if value else None
 
+    # ── Polling ───────────────────────────────────────────────────────────────
+
     def _toggle_running(self):
         self.stop() if self._running else self.start()
 
     def start(self):
-        if self._running:
+        self._start_job = None
+        if self._running or self._closed:
             return
         self._running = True
         self._start_button.configure(text="Stop")
@@ -1016,6 +1134,8 @@ class MemoryProfilingTab(tk.Frame):
         self._poll_once()
         self._draw_chart()
 
+    # ── Legend / selection ────────────────────────────────────────────────────
+
     def _update_value_labels(self):
         for meter, label in self._value_labels.items():
             value = self._current_values.get(meter)
@@ -1033,6 +1153,8 @@ class MemoryProfilingTab(tk.Frame):
         for variable in self._meter_vars.values():
             variable.set(False)
         self._draw_chart()
+
+    # ── Range navigation ──────────────────────────────────────────────────────
 
     def _current_span(self) -> Optional[float]:
         return RANGE_OPTIONS.get(self._range_var.get(), 3600)
@@ -1082,6 +1204,8 @@ class MemoryProfilingTab(tk.Frame):
             self._time_label.configure(text="No history")
             return
         upper = max(latest, time.time())
+        if upper <= earliest:  # CTkSlider divides by (to - from_)
+            upper = earliest + 1
         self._timeline.configure(from_=earliest, to=upper)
         current = upper if self._live_view else min(self._view_end or upper, upper)
         self._timeline_var.set(current)
@@ -1093,7 +1217,7 @@ class MemoryProfilingTab(tk.Frame):
     def _timeline_changed(self, raw_value):
         try:
             selected_time = float(raw_value)
-        except ValueError:
+        except (TypeError, ValueError):
             return
         if selected_time <= 1:
             return
@@ -1105,6 +1229,8 @@ class MemoryProfilingTab(tk.Frame):
             self._view_end = selected_time
         self._schedule_redraw()
 
+    # ── Chart ─────────────────────────────────────────────────────────────────
+
     def _schedule_redraw(self, _event=None):
         if self._redraw_job is not None:
             self.after_cancel(self._redraw_job)
@@ -1112,11 +1238,23 @@ class MemoryProfilingTab(tk.Frame):
 
     def _draw_chart(self):
         self._redraw_job = None
+        if self._closed:
+            return
         canvas = self._chart
         canvas.delete("all")
-        width = max(canvas.winfo_width(), 300)
-        height = max(canvas.winfo_height(), 220)
-        left, top, right, bottom = 76, 24, width - 22, height - 55
+        px = self._px
+        c_grid = theme.pick(CHART_GRID)
+        c_axis = theme.pick(CHART_AXIS)
+        c_text = theme.pick(CHART_TEXT)
+        c_live = theme.pick(CHART_LIVE)
+        font_body = theme.scaled_font(canvas, 12)
+        font_note = theme.scaled_font(canvas, 11)
+        font_tick = theme.scaled_font(canvas, 8)
+        font_title = theme.scaled_font(canvas, 9, "bold")
+
+        width = max(canvas.winfo_width(), px(300))
+        height = max(canvas.winfo_height(), px(220))
+        left, top, right, bottom = px(76), px(24), width - px(22), height - px(55)
         if right <= left or bottom <= top:
             return
 
@@ -1130,14 +1268,14 @@ class MemoryProfilingTab(tk.Frame):
             canvas.create_text(
                 width / 2, height / 2,
                 text=source_message,
-                fill=C_MUTED, font=("Segoe UI", 12),
+                fill=c_text, font=font_body,
             )
             return
         earliest, latest = self._history.time_bounds(path)
         if earliest is None or latest is None:
             canvas.create_text(
                 width / 2, height / 2, text="No meter history yet",
-                fill=C_MUTED, font=("Segoe UI", 12),
+                fill=c_text, font=font_body,
             )
             return
 
@@ -1157,37 +1295,41 @@ class MemoryProfilingTab(tk.Frame):
         # counters visible together, including legitimate zero values.
         for tick in range(int(max_log) + 1):
             y = bottom - (tick / max_log) * (bottom - top)
-            canvas.create_line(left, y, right, y, fill=C_GRID)
+            canvas.create_line(left, y, right, y, fill=c_grid)
             label_value = (10 ** tick) - 1
             canvas.create_text(
-                left - 9, y, text=self._format_axis(label_value),
-                anchor=tk.E, fill=C_MUTED, font=("Segoe UI", 8),
+                left - px(9), y, text=self._format_axis(label_value),
+                anchor=tk.E, fill=c_text, font=font_tick,
             )
 
         for index in range(7):
             ratio = index / 6
             x = left + ratio * (right - left)
             timestamp = start_time + ratio * (end_time - start_time)
-            canvas.create_line(x, top, x, bottom, fill=C_GRID)
+            canvas.create_line(x, top, x, bottom, fill=c_grid)
             canvas.create_text(
-                x, bottom + 16, text=self._format_time_tick(timestamp, end_time - start_time),
-                fill=C_MUTED, font=("Segoe UI", 8),
+                x, bottom + px(16),
+                text=self._format_time_tick(timestamp, end_time - start_time),
+                fill=c_text, font=font_tick,
             )
 
-        canvas.create_line(left, top, left, bottom, fill=C_AXIS)
-        canvas.create_line(left, bottom, right, bottom, fill=C_AXIS)
+        canvas.create_line(left, top, left, bottom, fill=c_axis)
+        canvas.create_line(left, bottom, right, bottom, fill=c_axis)
         canvas.create_text(
-            15, (top + bottom) / 2, text="log₁₀(value + 1)", angle=90,
-            fill=C_MUTED, font=("Segoe UI", 8),
+            px(15), (top + bottom) / 2, text="log₁₀(value + 1)", angle=90,
+            fill=c_text, font=font_tick,
         )
         canvas.create_text(
-            (left + right) / 2, height - 14,
+            (left + right) / 2, height - px(14),
             text="Time" + (" • LIVE" if self._live_view else " • HISTORY"),
-            fill=C_ACCENT if self._live_view else C_MUTED,
-            font=("Segoe UI", 9, "bold"),
+            fill=c_live if self._live_view else c_text,
+            font=font_title,
         )
 
+        line_width = px(2)
+        dot = px(2)
         for meter in selected:
+            colour = theme.pick(METER_COLORS[meter])
             coords = []
             for sampled_at, value in series.get(meter, []):
                 x = left + ((sampled_at - start_time) / (end_time - start_time)) * (right - left)
@@ -1196,27 +1338,27 @@ class MemoryProfilingTab(tk.Frame):
                 coords.extend((x, y))
             if len(coords) >= 4:
                 canvas.create_line(
-                    *coords, fill=METER_COLORS[meter], width=2,
+                    *coords, fill=colour, width=line_width,
                     smooth=False,
                 )
             elif len(coords) == 2:
                 x, y = coords
                 canvas.create_oval(
-                    x - 2, y - 2, x + 2, y + 2,
-                    fill=METER_COLORS[meter], outline="",
+                    x - dot, y - dot, x + dot, y + dot,
+                    fill=colour, outline="",
                 )
 
         if not selected:
             canvas.create_text(
                 (left + right) / 2, (top + bottom) / 2,
                 text="Select one or more meters from the list",
-                fill=C_MUTED, font=("Segoe UI", 11),
+                fill=c_text, font=font_note,
             )
         elif not points:
             canvas.create_text(
                 (left + right) / 2, (top + bottom) / 2,
                 text="No samples in this time range",
-                fill=C_MUTED, font=("Segoe UI", 11),
+                fill=c_text, font=font_note,
             )
 
     @staticmethod
@@ -1242,6 +1384,8 @@ class MemoryProfilingTab(tk.Frame):
         fmt = "%H:%M:%S" if span <= 6 * 60 * 60 else "%d %b\n%H:%M"
         return datetime.fromtimestamp(timestamp).strftime(fmt)
 
+    # ── Lifecycle ─────────────────────────────────────────────────────────────
+
     def _on_destroy(self, event):
         if event.widget is self:
             self.shutdown()
@@ -1251,18 +1395,14 @@ class MemoryProfilingTab(tk.Frame):
             return
         self._closed = True
         self._stop_tcp_server()
-        if self._poll_job is not None:
-            try:
-                self.after_cancel(self._poll_job)
-            except tk.TclError:
-                pass
-            self._poll_job = None
-        if self._redraw_job is not None:
-            try:
-                self.after_cancel(self._redraw_job)
-            except tk.TclError:
-                pass
-            self._redraw_job = None
+        for attribute in ("_start_job", "_poll_job", "_redraw_job"):
+            job = getattr(self, attribute)
+            if job is not None:
+                try:
+                    self.after_cancel(job)
+                except tk.TclError:
+                    pass
+                setattr(self, attribute, None)
         if self._history is not None:
             self._history.close()
             self._history = None
@@ -1270,4 +1410,4 @@ class MemoryProfilingTab(tk.Frame):
 
 if __name__ == "__main__":
     app = MemoryProfilingTab(standalone=True)
-    app.mainloop()
+    app.winfo_toplevel().mainloop()

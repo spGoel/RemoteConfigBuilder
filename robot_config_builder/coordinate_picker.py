@@ -4,11 +4,25 @@ Coordinates are returned in the original image's pixel space regardless
 of the display scale factor applied to fit the window.
 """
 import math
+import sys
 import tkinter as tk
-from tkinter import ttk, messagebox
+from pathlib import Path
+from tkinter import messagebox
+
+# The shared style layer lives at the repository root.
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+import customtkinter as ctk  # noqa: E402
+
+from common import theme  # noqa: E402
+from common.widgets import font  # noqa: E402
+
+from ui_helpers import center_over  # noqa: E402
 
 
-class ProgressDialog(tk.Toplevel):
+class ProgressDialog(ctk.CTkToplevel):
     """Indeterminate progress dialog shown during SSH/SCP operations."""
 
     def __init__(self, parent, message: str = "Working..."):
@@ -19,18 +33,17 @@ class ProgressDialog(tk.Toplevel):
         self.grab_set()
         self.protocol("WM_DELETE_WINDOW", lambda: None)  # not closeable
 
-        self._label = ttk.Label(self, text=message, padding=(24, 12))
-        self._label.pack()
-        pb = ttk.Progressbar(self, mode="indeterminate", length=280)
-        pb.pack(padx=24, pady=(0, 16))
-        pb.start(12)
+        self._label = ctk.CTkLabel(self, text=message, font=font("body"))
+        self._label.pack(padx=24, pady=(16, 8))
+        pb = ctk.CTkProgressBar(self, mode="indeterminate", width=280,
+                                progress_color=theme.ACCENT)
+        pb.pack(padx=24, pady=(0, 18))
+        pb.start()
 
-        self.update_idletasks()
-        pw, ph = parent.winfo_width(), parent.winfo_height()
-        px, py = parent.winfo_rootx(), parent.winfo_rooty()
-        self.geometry(f"320x90+{px + pw // 2 - 160}+{py + ph // 2 - 45}")
+        center_over(self, parent)
 
-class CoordinatePicker(tk.Toplevel):
+
+class CoordinatePicker(ctk.CTkToplevel):
     """
     Displays a screenshot scaled to fit the screen.
     User clicks → on_pick(real_x, real_y) is called with coordinates
@@ -73,42 +86,48 @@ class CoordinatePicker(tk.Toplevel):
         disp_h = img_h // factor
 
         # ── Info bar ──────────────────────────────────────────────
-        ttk.Label(
+        ctk.CTkLabel(
             self,
             text=(f"Click anywhere to set coordinates  |  "
                   f"Original: {img_w}×{img_h}  |  "
                   f"Displayed at 1:{factor}  |  Esc to cancel"),
-            padding=(6, 4),
-        ).pack(side=tk.TOP, fill=tk.X)
+            font=font("small"), anchor="w",
+        ).pack(side=tk.TOP, fill=tk.X, padx=8, pady=4)
+
+        # ── Coordinate status bar ─────────────────────────────────
+        self._coord_var = tk.StringVar(value="Hover over the image to see coordinates")
+        ctk.CTkLabel(self, textvariable=self._coord_var, font=font("small"),
+                     anchor="w").pack(side=tk.BOTTOM, fill=tk.X, padx=8, pady=3)
 
         # ── Canvas + scrollbars ───────────────────────────────────
-        cf = ttk.Frame(self)
+        # The image surface stays a tk.Canvas (CustomTkinter has none); its
+        # events report raw pixels, which is what the coordinate maths needs.
+        cf = ctk.CTkFrame(self, fg_color="transparent")
         cf.pack(fill=tk.BOTH, expand=True)
+        cf.columnconfigure(0, weight=1)
+        cf.rowconfigure(0, weight=1)
 
-        hbar = ttk.Scrollbar(cf, orient=tk.HORIZONTAL)
-        vbar = ttk.Scrollbar(cf, orient=tk.VERTICAL)
         self._canvas = tk.Canvas(
-            cf, cursor="crosshair",
-            xscrollcommand=hbar.set, yscrollcommand=vbar.set,
+            cf, cursor="crosshair", highlightthickness=0, borderwidth=0,
+            width=disp_w, height=disp_h, bg=theme.pick(theme.SUNKEN_BG),
         )
-        hbar.config(command=self._canvas.xview)
-        vbar.config(command=self._canvas.yview)
-        hbar.pack(side=tk.BOTTOM, fill=tk.X)
-        vbar.pack(side=tk.RIGHT, fill=tk.Y)
-        self._canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        vbar = ctk.CTkScrollbar(cf, orientation="vertical", command=self._canvas.yview)
+        hbar = ctk.CTkScrollbar(cf, orientation="horizontal", command=self._canvas.xview)
+        self._canvas.configure(xscrollcommand=hbar.set, yscrollcommand=vbar.set)
+        self._canvas.grid(row=0, column=0, sticky="nsew")
+        vbar.grid(row=0, column=1, sticky="ns")
+        hbar.grid(row=1, column=0, sticky="ew")
 
         self._canvas.create_image(0, 0, anchor=tk.NW, image=self._img_ref)
         self._canvas.configure(scrollregion=(0, 0, disp_w, disp_h))
 
-        # ── Coordinate status bar ─────────────────────────────────
-        self._coord_var = tk.StringVar(value="Hover over the image to see coordinates")
-        ttk.Label(self, textvariable=self._coord_var,
-                  padding=(6, 3)).pack(side=tk.BOTTOM, fill=tk.X)
-
         # ── Window size ───────────────────────────────────────────
-        win_w = min(disp_w + 24, int(screen_w * 0.92))
-        win_h = min(disp_h + 80, int(screen_h * 0.92))
-        self.geometry(f"{win_w}x{win_h}")
+        # Sizes derive from real image pixels, so bypass CTk's DPI-scaled
+        # geometry() and set the raw size with wm_geometry().
+        self.update_idletasks()
+        win_w = min(self.winfo_reqwidth(), int(screen_w * 0.92))
+        win_h = min(self.winfo_reqheight(), int(screen_h * 0.92))
+        self.wm_geometry(f"{win_w}x{win_h}")
 
         self._canvas.bind("<Motion>",   self._on_motion)
         self._canvas.bind("<Button-1>", self._on_click)

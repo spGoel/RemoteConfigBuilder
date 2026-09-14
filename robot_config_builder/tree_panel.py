@@ -1,11 +1,23 @@
+import sys
 import tkinter as tk
 from tkinter import ttk, simpledialog, messagebox
 import copy
+from pathlib import Path
 from typing import Optional, Callable
 
-from models import (
+# The shared style layer lives at the repository root.
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+import customtkinter as ctk  # noqa: E402
+
+from common import theme  # noqa: E402
+
+from models import (  # noqa: E402
     RobotNode, CONTAINER_TYPES, TAG_COLORS, classify_tag, display_label,
 )
+from ui_helpers import style_menu  # noqa: E402
 
 # Event type groups for context-menu submenus
 EVENT_GROUPS = [
@@ -17,12 +29,34 @@ EVENT_GROUPS = [
     ("Special",     ['meter-list', 'output']),
 ]
 
+# Dark-mode counterparts of models.TAG_COLORS: the same hues, lightened so
+# they stay legible on the dark tree background. models.py is not UI code
+# and keeps the light values.
+_TAG_COLORS_DARK = {
+    'container': '#6FA8F5',
+    'touch':     '#7BD389',
+    'control':   '#FFA35C',
+    'utility':   '#F48FB1',
+    'special':   '#A7B8C2',
+    'condition': '#C59CE8',
+}
 
-class TreePanel(ttk.Frame):
+
+def tag_colour_pairs() -> dict:
+    """(light, dark) foreground pair for every row tag."""
+    return {
+        tag: (light, _TAG_COLORS_DARK.get(tag, light))
+        for tag, light in TAG_COLORS.items()
+    }
+
+
+class TreePanel(ctk.CTkFrame):
     def __init__(self, parent,
                  on_node_selected: Optional[Callable] = None,
                  on_tree_changed: Optional[Callable] = None,
                  **kw):
+        kw.setdefault("corner_radius", 8)
+        kw.setdefault("fg_color", theme.SUNKEN_BG)
         super().__init__(parent, **kw)
         self.on_node_selected: Callable = on_node_selected or (lambda n: None)
         self.on_tree_changed: Callable = on_tree_changed or (lambda: None)
@@ -33,27 +67,31 @@ class TreePanel(ttk.Frame):
         self._build_ui()
 
     def _build_ui(self):
+        # CustomTkinter has no tree widget; ttk.Treeview stays, painted by
+        # theme.style_treeview() through the shared "App.Treeview" style.
         self.tree = ttk.Treeview(
             self,
             columns=("detail",),
             show="tree headings",
             selectmode="browse",
+            style="App.Treeview",
         )
         self.tree.heading("#0", text="Event")
         self.tree.heading("detail", text="Key Info")
-        self.tree.column("#0", width=175, minwidth=120, stretch=False)
-        self.tree.column("detail", width=230, minwidth=80, stretch=True)
+        # Column widths are raw pixels; scale them like the CTk widgets.
+        scale = theme.widget_scaling(self)
+        self.tree.column("#0", width=int(round(175 * scale)),
+                         minwidth=int(round(120 * scale)), stretch=False)
+        self.tree.column("detail", width=int(round(230 * scale)),
+                         minwidth=int(round(80 * scale)), stretch=True)
 
-        vsb = ttk.Scrollbar(self, orient="vertical", command=self.tree.yview)
+        vsb = ttk.Scrollbar(self, orient="vertical", command=self.tree.yview,
+                            style="App.Vertical.TScrollbar")
         self.tree.configure(yscrollcommand=vsb.set)
-        self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        vsb.pack(side=tk.RIGHT, fill=tk.Y)
-
-        for tag, color in TAG_COLORS.items():
-            self.tree.tag_configure(tag, foreground=color)
-        # Drop-into highlight (tag bg may be ignored on native Windows ttk themes,
-        # but the drop line below always shows regardless)
-        self.tree.tag_configure("drop_into", background="#7457C4", foreground="#FFFFFF")
+        self.tree.grid(row=0, column=0, sticky="nsew", padx=(6, 0), pady=6)
+        vsb.grid(row=0, column=1, sticky="ns", padx=(0, 6), pady=6)
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(0, weight=1)
 
         self.tree.bind("<<TreeviewSelect>>", self._on_select)
         self.tree.bind("<Button-3>",         self._on_right_click)
@@ -62,8 +100,10 @@ class TreePanel(ttk.Frame):
         self.tree.bind("<ButtonRelease-1>",  self._drag_release, add="+")
         self.tree.bind("<Escape>",           self._drag_cancel,  add="+")
 
-        # 2-pixel drop indicator line (placed over the treeview during drag)
-        self._drop_line = tk.Frame(self, height=2, bg="#5B3EA6")
+        # 2-pixel drop indicator line (placed over the treeview during drag).
+        # Plain tk.Frame on purpose: it is positioned with raw Treeview bbox
+        # pixels, and CTkFrame.place() would re-scale those coordinates.
+        self._drop_line = tk.Frame(self, height=2, borderwidth=0, highlightthickness=0)
 
         # Drag / drop state
         self._drag_src_iid: Optional[str]      = None
@@ -72,6 +112,25 @@ class TreePanel(ttk.Frame):
         self._drop_position: Optional[str]     = None  # "before" | "into" | "after"
 
         self._ctx = tk.Menu(self, tearoff=0)
+        self._apply_colours()
+
+    # ── Theme ──────────────────────────────────────────────────
+
+    def _apply_colours(self):
+        """Resolve every (light, dark) pair for the current appearance mode."""
+        for tag, pair in tag_colour_pairs().items():
+            self.tree.tag_configure(tag, foreground=theme.pick(pair))
+        # Drop-into highlight (tag bg may be ignored on native Windows ttk themes,
+        # but the drop line below always shows regardless)
+        self.tree.tag_configure("drop_into",
+                                background=theme.pick(theme.ACCENT),
+                                foreground="#FFFFFF")
+        self._drop_line.configure(bg=theme.pick(theme.ACCENT))
+        style_menu(self._ctx)
+
+    def on_appearance_change(self, _mode: str = None):
+        """Called after a Light/Dark switch; repaint the ttk/tk holdouts."""
+        self._apply_colours()
 
     # ── Public API ─────────────────────────────────────────────
 
@@ -180,8 +239,10 @@ class TreePanel(ttk.Frame):
 
         if node.node_type in CONTAINER_TYPES:
             child_menu = tk.Menu(m, tearoff=0)
+            style_menu(child_menu)
             for group_name, types in EVENT_GROUPS:
                 grp = tk.Menu(child_menu, tearoff=0)
+                style_menu(grp)
                 for etype in types:
                     grp.add_command(label=etype,
                                     command=lambda et=etype: self._add_child(et))
@@ -190,8 +251,10 @@ class TreePanel(ttk.Frame):
 
         if node is not self.root_node:
             sib_menu = tk.Menu(m, tearoff=0)
+            style_menu(sib_menu)
             for group_name, types in EVENT_GROUPS:
                 grp = tk.Menu(sib_menu, tearoff=0)
+                style_menu(grp)
                 for etype in types:
                     grp.add_command(label=etype,
                                     command=lambda et=etype: self._add_sibling(et))

@@ -13,9 +13,21 @@ import re
 import sys
 import threading
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import messagebox
 from pathlib import Path
 import xml.etree.ElementTree as ET
+
+# The shared style layer lives at the repository root.
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+import customtkinter as ctk  # noqa: E402
+
+from common import theme  # noqa: E402
+from common.widgets import Card, TreePane, font  # noqa: E402
+
+from ui_helpers import NEUTRAL, NEUTRAL_HOVER, center_over  # noqa: E402
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 SETTINGS_FILE         = Path.home() / ".robot_config_builder_emails.json"
@@ -95,7 +107,7 @@ def _merge_emails_into_xml(xml_content: str, new_emails: list) -> tuple:
 
 # ── Dialog ────────────────────────────────────────────────────────────────────
 
-class EmailDialog(tk.Toplevel):
+class EmailDialog(ctk.CTkToplevel):
     def __init__(self, parent, ip_var: tk.StringVar,
                  build_path_var: tk.StringVar):
         super().__init__(parent)
@@ -111,65 +123,69 @@ class EmailDialog(tk.Toplevel):
         self._build_ui()
         self._refresh_list()
 
-        self.update_idletasks()
-        x = parent.winfo_rootx() + (parent.winfo_width()  - self.winfo_width())  // 2
-        y = parent.winfo_rooty() + (parent.winfo_height() - self.winfo_height()) // 2
-        self.geometry(f"+{x}+{y}")
+        center_over(self, parent)
 
     # ── UI ─────────────────────────────────────────────────────────────────────
 
     def _build_ui(self):
         pad = dict(padx=12, pady=6)
 
-        add_frame = ttk.LabelFrame(self, text="Add Email Address  (must be @aristocrat.com)")
-        add_frame.pack(fill=tk.X, **pad)
+        add_card = Card(self, title="Add Email Address  (must be @aristocrat.com)")
+        add_card.pack(fill=tk.X, **pad)
 
-        entry_row = ttk.Frame(add_frame)
-        entry_row.pack(fill=tk.X, padx=8, pady=(6, 8))
+        entry_row = ctk.CTkFrame(add_card.body, fg_color="transparent")
+        entry_row.pack(fill=tk.X, pady=(0, 2))
 
         self._entry_var = tk.StringVar()
-        self._entry = ttk.Entry(entry_row, textvariable=self._entry_var, width=36)
+        self._entry = ctk.CTkEntry(entry_row, textvariable=self._entry_var,
+                                   width=320, height=30, font=font("body"))
         self._entry.pack(side=tk.LEFT, padx=(0, 6))
         self._entry.bind("<Return>", lambda _: self._add())
 
-        self._add_btn = ttk.Button(entry_row, text="Add", command=self._add)
+        self._add_btn = ctk.CTkButton(
+            entry_row, text="Add", command=self._add, width=78, height=30,
+            font=font("body"), fg_color=theme.ACCENT, hover_color=theme.ACCENT_HOVER,
+        )
         self._add_btn.pack(side=tk.LEFT)
 
         # Status label
         self._status_var = tk.StringVar()
-        ttk.Label(self, textvariable=self._status_var,
-                  foreground="#555", font=("Segoe UI", 8)).pack(
-            anchor=tk.W, padx=14, pady=(0, 2))
+        ctk.CTkLabel(self, textvariable=self._status_var, anchor="w",
+                     font=font("small"), text_color=theme.MUTED_FG).pack(
+            anchor=tk.W, fill=tk.X, padx=14, pady=(0, 2))
 
         # Email list
-        list_frame = ttk.LabelFrame(self, text="Email Addresses")
-        list_frame.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 6))
+        list_card = Card(self, title="Email Addresses")
+        list_card.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 6))
 
-        self._tree = ttk.Treeview(list_frame, columns=("email",), show="headings",
-                                   height=8, selectmode="browse")
-        self._tree.heading("email", text="Email")
-        self._tree.column("email", width=340, anchor=tk.W)
-        self._tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(8, 0), pady=8)
-
-        sb = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self._tree.yview)
-        sb.pack(side=tk.RIGHT, fill=tk.Y, pady=8, padx=(0, 4))
-        self._tree.configure(yscrollcommand=sb.set)
+        # CustomTkinter has no list/tree widget; TreePane wraps the ttk one.
+        pane = TreePane(list_card.body,
+                        columns=[("email", "Email", 340, tk.W, True)],
+                        height=8)
+        pane.pack(fill=tk.BOTH, expand=True)
+        self._tree = pane.tree
         self._tree.bind("<Delete>", lambda _: self._remove())
 
         # Bottom buttons
-        btn_row = ttk.Frame(self)
+        btn_row = ctk.CTkFrame(self, fg_color="transparent")
         btn_row.pack(fill=tk.X, padx=12, pady=(0, 12))
 
-        ttk.Button(btn_row, text="Remove Selected",
-                   command=self._remove).pack(side=tk.LEFT)
-        ttk.Button(btn_row, text="Remove All",
-                   command=self._remove_all).pack(side=tk.LEFT, padx=(6, 0))
+        def neutral(text, command):
+            return ctk.CTkButton(
+                btn_row, text=text, command=command, height=30,
+                width=max(len(text) * 8 + 24, 78), font=font("body"),
+                fg_color=NEUTRAL, hover_color=NEUTRAL_HOVER, text_color=theme.BODY_FG,
+            )
 
-        self._update_btn = ttk.Button(btn_row, text="Update XML",
-                                       command=self._update_xml)
+        neutral("Remove Selected", self._remove).pack(side=tk.LEFT)
+        neutral("Remove All", self._remove_all).pack(side=tk.LEFT, padx=(6, 0))
+
+        self._update_btn = ctk.CTkButton(
+            btn_row, text="Update XML", command=self._update_xml, width=110, height=30,
+            font=font("heading"), fg_color=theme.ACCENT, hover_color=theme.ACCENT_HOVER,
+        )
         self._update_btn.pack(side=tk.RIGHT, padx=(6, 0))
-        ttk.Button(btn_row, text="Close",
-                   command=self.destroy).pack(side=tk.RIGHT)
+        neutral("Close", self.destroy).pack(side=tk.RIGHT)
 
         self._entry.focus_set()
 

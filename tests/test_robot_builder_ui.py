@@ -15,6 +15,8 @@ sys.path.insert(0, os.path.join(REPO, "robot_builder"))
 
 import customtkinter as ctk  # noqa: E402
 
+from tests.tk_teardown import destroy_root  # noqa: E402
+
 from common import widgets  # noqa: E402
 import main as robot_builder  # noqa: E402  (robot_builder/main.py)
 
@@ -35,7 +37,7 @@ class RobotBuilderTabTests(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
-        cls.root.destroy()
+        destroy_root(cls.root)
 
     def setUp(self):
         self.app = RobotBuilderApp(self.root, standalone=False)
@@ -177,7 +179,7 @@ class LauncherTests(unittest.TestCase):
                 shutdown = getattr(tool_app, "shutdown", None)
                 if callable(shutdown):
                     shutdown()
-            app.destroy()
+            destroy_root(app)
 
 
 if __name__ == "__main__":

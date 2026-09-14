@@ -1,4 +1,9 @@
-"""Standalone tcMalloc heap browser and remote PDF report generator."""
+"""Standalone tcMalloc heap browser and remote PDF report generator.
+
+UI is CustomTkinter (the heap list stays a ttk.Treeview via widgets.TreePane,
+as CustomTkinter has no tree widget). Everything from the SSH listing through
+pprof invocation and PDF download is unchanged from the plain-tkinter version.
+"""
 
 from __future__ import annotations
 
@@ -16,18 +21,19 @@ import threading
 import tkinter as tk
 from datetime import datetime
 from pathlib import Path
-from tkinter import filedialog, ttk
+from tkinter import filedialog
 from typing import Dict, List, Optional, Tuple
 
+# The shared style layer lives at the repository root.
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
-C_BG = "#F3F0FA"
-C_SURFACE = "#FFFFFF"
-C_TEXT = "#1A1820"
-C_MUTED = "#5C5870"
-C_ACCENT = "#5B3EA6"
-C_OK = "#2E7D32"
-C_WARN = "#B26A00"
-C_ERROR = "#B71C1C"
+import customtkinter as ctk  # noqa: E402
+
+from common import theme, widgets  # noqa: E402
+from common.widgets import Card, LogPane, TreePane, font  # noqa: E402
+
 
 DATA_DIR = Path.home() / ".tcmalloc_report_viewer"
 REPORT_DIR = DATA_DIR / "reports"
@@ -208,12 +214,34 @@ def analyze_remote_heap(ip: str, host_path: str, heap_path: str) -> Tuple[Path, 
         client.close()
 
 
-class TcMallocReportTab(tk.Frame):
+# Secondary-action buttons (same pair Robot Builder uses locally).
+_NEUTRAL = ("gray70", "gray35")
+_NEUTRAL_HOVER = ("gray60", "gray45")
+
+# Treeview columns: (name, heading, nominal width, anchor, stretch).
+_TREE_COLUMNS = (
+    ("number", "Heap #", 60, "e", False),
+    ("modified", "Modified", 130, "w", False),
+    ("size", "Size", 80, "e", False),
+    ("path", "Heap file", 220, "w", True),
+)
+
+
+class TcMallocReportTab(ctk.CTkFrame):
     def __init__(self, master=None, standalone: bool = False):
         if master is None:
-            master = tk.Tk()
+            master = ctk.CTk()
+            ctk.set_appearance_mode("System")
+            ctk.set_default_color_theme("blue")
             standalone = True
-        super().__init__(master, bg=C_BG)
+        super().__init__(master, fg_color="transparent", corner_radius=0)
+        self._standalone = standalone
+        self._root_window = self.winfo_toplevel()
+        if not widgets.FONTS:
+            widgets.init_styles(self._root_window)
+        if self._standalone:
+            self._root_window.title("tcMalloc Report Analyzer")
+
         self._closed = False
         self._request_id = 0
         self._records: List[dict] = []
@@ -230,113 +258,169 @@ class TcMallocReportTab(tk.Frame):
         self._status_var = tk.StringVar(value="Enter the EGM IP and host path")
         self._selection_var = tk.StringVar(value="No heap selected")
 
-        if standalone:
-            root = self.winfo_toplevel()
-            root.title("tcMalloc Report Analyzer")
-            root.geometry("1280x780")
-            self.pack(fill=tk.BOTH, expand=True)
-
         self._build_ui()
         for variable in (self._ip_var, self._host_var):
             variable.trace_add("write", self._connection_changed)
         self._filter_var.trace_add("write", self._filter_changed)
         self.bind("<Destroy>", self._on_destroy, add="+")
 
+        if self._standalone:
+            self.pack(fill=tk.BOTH, expand=True)
+            self._apply_initial_geometry()
+
+    # ── UI ────────────────────────────────────────────────────────────────────
+
     def _build_ui(self):
-        controls = tk.Frame(self, bg=C_SURFACE, padx=12, pady=10)
-        controls.pack(fill=tk.X, padx=10, pady=(10, 6))
-        tk.Label(controls, text="EGM IP:", bg=C_SURFACE, fg=C_TEXT).grid(
-            row=0, column=0, sticky="w"
-        )
-        ttk.Entry(controls, textvariable=self._ip_var, width=18).grid(
-            row=0, column=1, padx=(5, 12), sticky="w"
-        )
-        tk.Label(controls, text="Host path:", bg=C_SURFACE, fg=C_TEXT).grid(
-            row=0, column=2, sticky="e"
-        )
-        ttk.Entry(controls, textvariable=self._host_var).grid(
-            row=0, column=3, columnspan=3, padx=(5, 8), sticky="ew"
-        )
-        self._refresh_button = ttk.Button(
-            controls, text="Load Heap Files", command=self.refresh
-        )
+        if self._standalone:
+            self._build_header()
+        body_pad = 16 if self._standalone else 12
+        body = ctk.CTkFrame(self, fg_color="transparent")
+        body.pack(fill=tk.BOTH, expand=True, padx=body_pad, pady=(10, 4))
+        self._controls_section(body)
+        self._notice_section(body)
+        self._browser_section(body)
+        self._status_bar()
+
+    def _build_header(self):
+        hdr = ctk.CTkFrame(self, fg_color=theme.ACCENT, corner_radius=0)
+        hdr.pack(fill=tk.X)
+        ctk.CTkLabel(hdr, text="tcMalloc Report Analyzer", font=font("title"),
+                     text_color="#FFFFFF").pack(pady=(14, 0))
+        ctk.CTkLabel(hdr, text="Browse heap snapshots and generate pprof PDF reports",
+                     font=font("small"), text_color="#C4B4F4").pack(pady=(0, 12))
+
+    def _label(self, parent, text: str, **kwargs) -> ctk.CTkLabel:
+        kwargs.setdefault("anchor", "w")
+        kwargs.setdefault("font", font("body"))
+        return ctk.CTkLabel(parent, text=text, **kwargs)
+
+    def _button(self, parent, text: str, command, primary: bool = True,
+                **kwargs) -> ctk.CTkButton:
+        kwargs.setdefault("height", 30)
+        if primary:
+            kwargs.setdefault("fg_color", theme.ACCENT)
+            kwargs.setdefault("hover_color", theme.ACCENT_HOVER)
+            kwargs.setdefault("font", font("heading"))
+        else:
+            kwargs.setdefault("fg_color", _NEUTRAL)
+            kwargs.setdefault("hover_color", _NEUTRAL_HOVER)
+            kwargs.setdefault("text_color", theme.BODY_FG)
+            kwargs.setdefault("font", font("body"))
+        return ctk.CTkButton(parent, text=text, command=command, **kwargs)
+
+    def _controls_section(self, parent):
+        card = Card(parent, title="EGM Connection")
+        card.pack(fill=tk.X, pady=(0, 10))
+        f = card.body
+        f.columnconfigure(0, weight=0)
+        f.columnconfigure(3, weight=1)
+
+        self._label(f, "EGM IP").grid(row=0, column=0, sticky="w")
+        ctk.CTkEntry(f, textvariable=self._ip_var, width=170, height=30,
+                     font=font("body")).grid(row=0, column=1, padx=(6, 14), sticky="w")
+        self._label(f, "Host path", anchor="e").grid(row=0, column=2, sticky="e")
+        ctk.CTkEntry(f, textvariable=self._host_var, height=30,
+                     font=font("body")).grid(
+            row=0, column=3, columnspan=3, padx=(6, 10), sticky="ew")
+        self._refresh_button = self._button(f, "Load Heap Files", self.refresh, width=150)
         self._refresh_button.grid(row=0, column=6, sticky="w")
 
-        tk.Label(controls, text="Filter:", bg=C_SURFACE).grid(
-            row=1, column=0, pady=(9, 0), sticky="w"
-        )
-        ttk.Entry(controls, textvariable=self._filter_var, width=32).grid(
-            row=1, column=1, columnspan=3, pady=(9, 0), padx=(5, 8), sticky="ew"
-        )
-        self._convert_button = ttk.Button(
-            controls, text="Convert to PDF", command=self._analyze,
-            state=tk.DISABLED,
-        )
-        self._convert_button.grid(row=1, column=4, pady=(9, 0), sticky="w")
-        ttk.Button(controls, text="Open PDF", command=self._open_pdf).grid(
-            row=1, column=5, pady=(9, 0), padx=(4, 0), sticky="w"
-        )
-        ttk.Button(controls, text="Save PDF As…", command=self._save_pdf).grid(
-            row=1, column=6, pady=(9, 0), padx=(4, 0), sticky="w"
-        )
-        controls.grid_columnconfigure(3, weight=1)
+        self._label(f, "Filter").grid(row=1, column=0, pady=(10, 0), sticky="w")
+        ctk.CTkEntry(f, textvariable=self._filter_var, height=30,
+                     placeholder_text="Match heap file name…",
+                     font=font("body")).grid(
+            row=1, column=1, columnspan=3, pady=(10, 0), padx=(6, 10), sticky="ew")
+        self._convert_button = self._button(
+            f, "Convert to PDF", self._analyze, width=150, state="disabled")
+        self._convert_button.grid(row=1, column=4, pady=(10, 0), sticky="w")
+        self._button(f, "Open PDF", self._open_pdf, primary=False, width=100).grid(
+            row=1, column=5, pady=(10, 0), padx=(6, 0), sticky="w")
+        self._button(f, "Save PDF As…", self._save_pdf, primary=False, width=120).grid(
+            row=1, column=6, pady=(10, 0), padx=(6, 0), sticky="w")
 
-        notice = tk.Frame(self, bg="#FFF4D6", padx=12, pady=7)
-        notice.pack(fill=tk.X, padx=10, pady=(0, 6))
-        tk.Label(
+    def _notice_section(self, parent):
+        notice = ctk.CTkFrame(parent, fg_color=theme.SUNKEN_BG, corner_radius=8)
+        notice.pack(fill=tk.X, pady=(0, 10))
+        ctk.CTkLabel(
             notice,
             text="Select a heap file, then click Convert to PDF. "
                  "The build is validated using .mk7conf inside the host path.",
-            bg="#FFF4D6", fg="#714B00", anchor="w",
-        ).pack(fill=tk.X)
+            font=font("small"), text_color=theme.WARN_FG, anchor="w",
+        ).pack(fill=tk.X, padx=14, pady=8)
 
-        pane = tk.PanedWindow(self, orient=tk.HORIZONTAL, bg=C_BG, sashwidth=5, bd=0)
-        pane.pack(fill=tk.BOTH, expand=True, padx=10)
-        left = tk.Frame(pane, bg=C_SURFACE)
-        right = tk.Frame(pane, bg=C_SURFACE)
-        pane.add(left, minsize=430)
-        pane.add(right, stretch="always", minsize=500)
+    def _browser_section(self, parent):
+        split = ctk.CTkFrame(parent, fg_color="transparent")
+        split.pack(fill=tk.BOTH, expand=True)
+        split.columnconfigure(0, weight=2, uniform="pane")
+        split.columnconfigure(1, weight=3, uniform="pane")
+        split.rowconfigure(0, weight=1)
 
-        columns = ("number", "modified", "size", "path")
-        self._tree = ttk.Treeview(left, columns=columns, show="headings", selectmode="browse")
-        for key, title, width in (
-            ("number", "Heap #", 65), ("modified", "Modified", 125),
-            ("size", "Size", 80), ("path", "Heap file", 390),
-        ):
-            self._tree.heading(key, text=title)
-            self._tree.column(key, width=width, anchor="e" if key in {"number", "size"} else "w")
-        ybar = ttk.Scrollbar(left, orient=tk.VERTICAL, command=self._tree.yview)
-        self._tree.configure(yscrollcommand=ybar.set)
-        self._tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        ybar.pack(side=tk.RIGHT, fill=tk.Y)
+        # Left: heap list (the one ttk holdout, themed by TreePane).
+        left = Card(split, title="Heap Files")
+        left.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
+        left.body.rowconfigure(0, weight=1)
+        self._tree_pane = TreePane(left.body, _TREE_COLUMNS, height=16)
+        self._tree_pane.grid(row=0, column=0, sticky="nsew")
+        self._tree = self._tree_pane.tree
         self._tree.bind("<<TreeviewSelect>>", self._heap_selected)
 
-        header = tk.Frame(right, bg="#EEEAF8", padx=12, pady=9)
-        header.pack(fill=tk.X)
-        tk.Label(
-            header, text="tcMalloc Analysis", bg="#EEEAF8", fg=C_ACCENT,
-            font=("Segoe UI", 11, "bold"),
-        ).pack(side=tk.LEFT)
-        tk.Label(
-            header, textvariable=self._selection_var, bg="#EEEAF8", fg=C_TEXT,
-            anchor="e",
-        ).pack(side=tk.RIGHT, fill=tk.X, expand=True)
+        # Right: analysis header + console.
+        right = Card(split)
+        right.grid(row=0, column=1, sticky="nsew")
+        header = ctk.CTkFrame(right, fg_color="transparent")
+        header.pack(fill=tk.X, padx=14, pady=(12, 4))
+        ctk.CTkLabel(header, text="tcMalloc Analysis", font=font("heading"),
+                     text_color=theme.ACCENT, anchor="w").pack(side=tk.LEFT)
+        ctk.CTkLabel(header, textvariable=self._selection_var, font=font("small"),
+                     text_color=theme.MUTED_FG, anchor="e").pack(
+            side=tk.RIGHT, fill=tk.X, expand=True)
+        self._log = LogPane(right, height=280)
+        self._log.pack(fill=tk.BOTH, expand=True, padx=14, pady=(0, 12))
+        self._console = self._log.textbox
+        self._console.configure(wrap="word")
 
-        self._console = tk.Text(
-            right, wrap=tk.WORD, font=("Consolas", 9), bg="#FCFCFE",
-            fg=C_TEXT, padx=9, pady=9,
-        )
-        self._console.pack(fill=tk.BOTH, expand=True)
-        self._console.tag_configure("ok", foreground=C_OK, font=("Consolas", 9, "bold"))
-        self._console.tag_configure("error", foreground=C_ERROR)
-        self._console.configure(state=tk.DISABLED)
+    def _status_bar(self):
+        bar = ctk.CTkFrame(self, fg_color=theme.SUNKEN_BG, corner_radius=0, height=28)
+        bar.pack(fill=tk.X, side=tk.BOTTOM)
+        ctk.CTkLabel(bar, textvariable=self._status_var, font=font("small"),
+                     text_color=theme.MUTED_FG, anchor="w").pack(
+            side=tk.LEFT, fill=tk.X, expand=True, padx=12, pady=4)
 
-        status = tk.Frame(self, bg=C_SURFACE, padx=12, pady=7)
-        status.pack(fill=tk.X, padx=10, pady=(6, 10))
-        tk.Label(
-            status, textvariable=self._status_var, bg=C_SURFACE, fg=C_MUTED,
-            anchor="w",
-        ).pack(fill=tk.X)
+    # ── Helpers ───────────────────────────────────────────────────────────────
+
+    def _apply_initial_geometry(self):
+        """Standalone only: open maximised with a DPI-safe fallback size.
+
+        CustomTkinter multiplies geometry() by its scaling factor, so a fixed
+        size can open partly off-screen on a scaled display.
+        """
+        root = self._root_window
+        scaling = theme.widget_scaling(root)
+        screen_w = root.winfo_screenwidth() / scaling
+        screen_h = root.winfo_screenheight() / scaling
+        width = int(min(1280, screen_w * 0.9))
+        height = int(min(780, screen_h * 0.9))
+        root.geometry("{}x{}+{}+{}".format(
+            width, height,
+            max(0, int((screen_w - width) / 2)),
+            max(0, int((screen_h - height) / 2)),
+        ))
+        root.minsize(int(min(900, screen_w * 0.6)), int(min(640, screen_h * 0.6)))
+        try:
+            root.state("zoomed")
+        except tk.TclError:
+            pass
+
+    def on_appearance_change(self, _mode: str):
+        """Called by the launcher after a Light/Dark switch; repaint the ttk tree."""
+        theme.style_treeview(self)
+        self._tree_pane.apply_tags()
+
+    def shutdown(self):
+        """Drop any in-flight worker results; the widgets are about to go."""
+        self._closed = True
+
+    # ── Actions ───────────────────────────────────────────────────────────────
 
     def refresh(self):
         self._request_id += 1
@@ -346,8 +430,8 @@ class TcMallocReportTab(tk.Frame):
         if not ip or not host:
             self._status_var.set("Enter the EGM IP and host path")
             return
-        self._refresh_button.configure(state=tk.DISABLED)
-        self._convert_button.configure(state=tk.DISABLED)
+        self._refresh_button.configure(state="disabled")
+        self._convert_button.configure(state="disabled")
         self._tree.configure(selectmode="none")
         self._records = []
         self._populate_tree()
@@ -373,16 +457,16 @@ class TcMallocReportTab(tk.Frame):
             return
         self._records = records
         self._populate_tree()
-        self._refresh_button.configure(state=tk.NORMAL)
-        self._convert_button.configure(state=tk.DISABLED)
+        self._refresh_button.configure(state="normal")
+        self._convert_button.configure(state="disabled")
         self._tree.configure(selectmode="browse")
         self._status_var.set(f"{len(records)} tcMalloc heap file(s) found")
 
     def _failed(self, request_id: int, message: str):
         if self._closed or request_id != self._request_id:
             return
-        self._refresh_button.configure(state=tk.NORMAL)
-        self._convert_button.configure(state=tk.DISABLED)
+        self._refresh_button.configure(state="normal")
+        self._convert_button.configure(state="disabled")
         self._tree.configure(selectmode="browse")
         self._status_var.set(message.splitlines()[0] if message else "Operation failed")
         self._write_console(message, error=True)
@@ -415,7 +499,7 @@ class TcMallocReportTab(tk.Frame):
             f"{record['name']}"
         )
         self._convert_button.configure(
-            state=tk.NORMAL if self._selected_record else tk.DISABLED
+            state="normal" if self._selected_record else "disabled"
         )
         self._status_var.set(f"Selected {record['name']}; click Convert to PDF")
 
@@ -431,9 +515,9 @@ class TcMallocReportTab(tk.Frame):
         self._request_id += 1
         request_id = self._request_id
         self._latest_pdf = None
-        self._convert_button.configure(state=tk.DISABLED)
+        self._convert_button.configure(state="disabled")
         self._tree.state(["disabled"])
-        self._refresh_button.configure(state=tk.DISABLED)
+        self._refresh_button.configure(state="disabled")
         self._status_var.set(f"Analyzing heap {_heap_number(heap_path)} on EGM {ip}…")
         self._write_console(
             f"Running tcMalloc_profiler.sh for:\n{heap_path}\n\nThis can take several minutes…\n"
@@ -457,9 +541,9 @@ class TcMallocReportTab(tk.Frame):
             return
         self._latest_pdf = pdf
         self._tree.state(["!disabled"])
-        self._refresh_button.configure(state=tk.NORMAL)
+        self._refresh_button.configure(state="normal")
         self._convert_button.configure(
-            state=tk.NORMAL if self._selected_record else tk.DISABLED
+            state="normal" if self._selected_record else "disabled"
         )
         self._write_console(console + f"\n\nDownloaded PDF:\n{pdf}\n", ok=True)
         self._status_var.set(f"Analysis complete: {pdf.name}")
@@ -468,19 +552,22 @@ class TcMallocReportTab(tk.Frame):
         if self._closed or request_id != self._request_id:
             return
         self._tree.state(["!disabled"])
-        self._refresh_button.configure(state=tk.NORMAL)
+        self._refresh_button.configure(state="normal")
         self._convert_button.configure(
-            state=tk.NORMAL if self._selected_record else tk.DISABLED
+            state="normal" if self._selected_record else "disabled"
         )
         self._status_var.set(message.splitlines()[0] if message else "Analysis failed")
         self._write_console(message, error=True)
 
     def _write_console(self, text: str, ok: bool = False, error: bool = False):
-        self._console.configure(state=tk.NORMAL)
+        self._console.configure(state="normal")
         self._console.delete("1.0", tk.END)
-        tag = "error" if error else "ok" if ok else None
+        tag = "error" if error else "ok" if ok else "plain"
         self._console.insert(tk.END, text, tag)
-        self._console.configure(state=tk.DISABLED)
+        self._console.configure(state="disabled")
+
+    def _console_contents(self) -> str:
+        return self._log.contents()
 
     def _open_pdf(self):
         if not self._latest_pdf or not self._latest_pdf.exists():
@@ -525,14 +612,14 @@ class TcMallocReportTab(tk.Frame):
         self._populate_tree()
         self._tree.state(["!disabled"])
         self._tree.configure(selectmode="browse")
-        self._refresh_button.configure(state=tk.NORMAL)
-        self._convert_button.configure(state=tk.DISABLED)
+        self._refresh_button.configure(state="normal")
+        self._convert_button.configure(state="disabled")
         self._selection_var.set("No heap selected")
         self._status_var.set("Click Load Heap Files to validate this build")
 
     def _filter_changed(self, *_args):
         self._selected_record = None
-        self._convert_button.configure(state=tk.DISABLED)
+        self._convert_button.configure(state="disabled")
         self._selection_var.set("No heap selected")
         self._populate_tree()
 
@@ -552,4 +639,4 @@ class TcMallocReportTab(tk.Frame):
 
 if __name__ == "__main__":
     app = TcMallocReportTab(standalone=True)
-    app.mainloop()
+    app.winfo_toplevel().mainloop()

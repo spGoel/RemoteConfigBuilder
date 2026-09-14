@@ -1,16 +1,37 @@
+import sys
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import messagebox
+from pathlib import Path
 from typing import Optional, Callable
 
-import snapshot_manager
-from coordinate_picker import CoordinatePicker, ProgressDialog
-from models import RobotNode, ALL_METERS, BUTTON_KEYS, DOOR_NAMES, GAME_STATES
+# The shared style layer lives at the repository root.
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+import customtkinter as ctk  # noqa: E402
+
+from common import theme  # noqa: E402
+from common.widgets import Card, font  # noqa: E402
+
+import snapshot_manager  # noqa: E402
+from coordinate_picker import CoordinatePicker, ProgressDialog  # noqa: E402
+from models import RobotNode, ALL_METERS, BUTTON_KEYS, DOOR_NAMES, GAME_STATES  # noqa: E402
+
+# Fixed label column widths (CTk pixels, before DPI scaling). The old ttk
+# labels used character widths of 8-12; these keep the same alignment.
+_LW_8 = 66
+_LW_9 = 76
+_LW_10 = 84
+_LW_12 = 100
 
 
-class PropertiesPanel(ttk.Frame):
+class PropertiesPanel(ctk.CTkFrame):
     def __init__(self, parent,
                  on_property_changed: Optional[Callable] = None,
                  **kw):
+        kw.setdefault("fg_color", "transparent")
+        kw.setdefault("corner_radius", 0)
         super().__init__(parent, **kw)
         self.on_property_changed: Callable = on_property_changed or (lambda: None)
         self._current_node: Optional[RobotNode] = None
@@ -21,27 +42,76 @@ class PropertiesPanel(ttk.Frame):
         self._build_ui()
 
     def _build_ui(self):
-        self.canvas = tk.Canvas(self, borderwidth=0, highlightthickness=0)
-        vsb = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
-        self.canvas.configure(yscrollcommand=vsb.set)
-        vsb.pack(side=tk.RIGHT, fill=tk.Y)
-        self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        # CTkScrollableFrame replaces the hand-rolled Canvas + inner frame +
+        # scrollbar; it tracks the scroll region and mouse wheel itself.
+        self.inner = ctk.CTkScrollableFrame(self, fg_color="transparent")
+        self.inner.pack(fill=tk.BOTH, expand=True)
+        # Kept for callers used to the old layout; this is the scrolling canvas.
+        self.canvas = self.inner._parent_canvas
 
-        self.inner = ttk.Frame(self.canvas)
-        self._win_id = self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
+    def on_appearance_change(self, _mode: str = None):
+        """Called after a Light/Dark switch; every widget here is CTk."""
 
-        self.inner.bind("<Configure>", self._on_inner_cfg)
-        self.canvas.bind("<Configure>", self._on_canvas_cfg)
-        self.canvas.bind_all("<MouseWheel>", self._on_scroll)
+    # ── Widget factories ────────────────────────────────────────
 
-    def _on_inner_cfg(self, _=None):
-        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+    def _row(self, parent, pady=2) -> ctk.CTkFrame:
+        r = ctk.CTkFrame(parent, fg_color="transparent")
+        r.pack(fill=tk.X, padx=4, pady=pady)
+        return r
 
-    def _on_canvas_cfg(self, event):
-        self.canvas.itemconfig(self._win_id, width=event.width)
+    def _section(self, title: str):
+        card = Card(self.inner, title=title)
+        card.pack(fill=tk.X, padx=8, pady=4)
+        return card.body
 
-    def _on_scroll(self, event):
-        self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+    def _separator(self):
+        ctk.CTkFrame(self.inner, height=1, corner_radius=0,
+                     fg_color=theme.BORDER).pack(fill=tk.X, padx=8, pady=4)
+
+    def _label(self, parent, text: str, width: int = None, muted: bool = False):
+        kw = dict(text=text, anchor="w",
+                  font=font("small") if muted else font("body"))
+        if muted:
+            kw["text_color"] = theme.MUTED_FG
+        if width is not None:
+            kw["width"] = width
+        return ctk.CTkLabel(parent, **kw)
+
+    def _entry(self, parent, variable, width: int = None) -> ctk.CTkEntry:
+        kw = dict(textvariable=variable, font=font("body"), height=28)
+        if width is not None:
+            kw["width"] = width
+        return ctk.CTkEntry(parent, **kw)
+
+    def _combo(self, parent, variable, values, width: int,
+               readonly: bool = True) -> ctk.CTkComboBox:
+        return ctk.CTkComboBox(
+            parent, variable=variable, values=list(values), width=width, height=28,
+            font=font("body"), dropdown_font=font("body"),
+            state="readonly" if readonly else "normal",
+            button_color=theme.ACCENT, button_hover_color=theme.ACCENT_HOVER,
+            border_color=theme.BORDER,
+        )
+
+    def _check(self, parent, text: str, variable, command=None) -> ctk.CTkCheckBox:
+        return ctk.CTkCheckBox(
+            parent, text=text, variable=variable, command=command,
+            font=font("body"), checkbox_width=20, checkbox_height=20,
+            fg_color=theme.ACCENT, hover_color=theme.ACCENT_HOVER,
+        )
+
+    def _radio(self, parent, text: str, variable, value, command=None) -> ctk.CTkRadioButton:
+        return ctk.CTkRadioButton(
+            parent, text=text, variable=variable, value=value, command=command,
+            font=font("body"), radiobutton_width=18, radiobutton_height=18,
+            fg_color=theme.ACCENT, hover_color=theme.ACCENT_HOVER,
+        )
+
+    def _button(self, parent, text: str, command, width: int) -> ctk.CTkButton:
+        return ctk.CTkButton(
+            parent, text=text, command=command, width=width, height=28,
+            font=font("body"), fg_color=theme.ACCENT, hover_color=theme.ACCENT_HOVER,
+        )
 
     # ── Public ─────────────────────────────────────────────────
 
@@ -53,14 +123,13 @@ class PropertiesPanel(ttk.Frame):
         if node is None:
             return
 
-        ttk.Label(self.inner, text=f"  {node.node_type}",
-                  font=("TkDefaultFont", 11, "bold")).pack(anchor="w", padx=8, pady=(8, 2))
+        ctk.CTkLabel(self.inner, text=f"  {node.node_type}", anchor="w",
+                     font=font("heading")).pack(anchor="w", padx=8, pady=(8, 2))
 
-        cf = ttk.LabelFrame(self.inner, text="Common Attributes")
-        cf.pack(fill=tk.X, padx=8, pady=4)
+        cf = self._section("Common Attributes")
         self._render_common(cf, node)
 
-        ttk.Separator(self.inner, orient=tk.HORIZONTAL).pack(fill=tk.X, padx=8, pady=4)
+        self._separator()
 
         dispatch = {
             'Touch-Screen':  self._render_touch_screen,
@@ -80,36 +149,34 @@ class PropertiesPanel(ttk.Frame):
         if renderer:
             renderer(node)
         else:
-            ttk.Label(self.inner, text="(children define behavior)",
-                      foreground="#888").pack(padx=8, pady=8, anchor="w")
+            self._label(self.inner, "(children define behavior)",
+                        muted=True).pack(padx=8, pady=8, anchor="w")
 
         # State filter — available on all event types except special nodes
         if node.node_type not in ('meter-list', 'output'):
-            ttk.Separator(self.inner, orient=tk.HORIZONTAL).pack(fill=tk.X, padx=8, pady=4)
+            self._separator()
             self._render_state_filter(node)
 
         self.inner.update_idletasks()
-        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
         self.canvas.yview_moveto(0)
 
     # ── Common fields ───────────────────────────────────────────
 
     def _render_common(self, parent, node: RobotNode):
         # ID
-        r = ttk.Frame(parent); r.pack(fill=tk.X, padx=4, pady=2)
-        ttk.Label(r, text="ID:", width=9).pack(side=tk.LEFT)
+        r = self._row(parent)
+        self._label(r, "ID:", width=_LW_9).pack(side=tk.LEFT)
         v = tk.StringVar(value=node.id); self._vars['id'] = v
-        ttk.Entry(r, textvariable=v).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self._entry(r, v).pack(side=tk.LEFT, fill=tk.X, expand=True)
         v.trace_add('write', lambda *_: self._write_field(node, 'id', v.get(), is_attr=False))
 
         # Weight
-        r2 = ttk.Frame(parent); r2.pack(fill=tk.X, padx=4, pady=2)
-        ttk.Label(r2, text="Weight:", width=9).pack(side=tk.LEFT)
+        r2 = self._row(parent)
+        self._label(r2, "Weight:", width=_LW_9).pack(side=tk.LEFT)
         wv = tk.StringVar(value='' if node.weight is None else str(node.weight))
         self._vars['weight'] = wv
-        ttk.Entry(r2, textvariable=wv, width=8).pack(side=tk.LEFT)
-        ttk.Label(r2, text="  used inside Random/Scheduled",
-                  foreground="#888").pack(side=tk.LEFT)
+        self._entry(r2, wv, width=80).pack(side=tk.LEFT)
+        self._label(r2, "  used inside Random/Scheduled", muted=True).pack(side=tk.LEFT)
 
         def _weight_change(*_):
             raw = wv.get().strip()
@@ -121,10 +188,10 @@ class PropertiesPanel(ttk.Frame):
         wv.trace_add('write', _weight_change)
 
         # Comment
-        r3 = ttk.Frame(parent); r3.pack(fill=tk.X, padx=4, pady=2)
-        ttk.Label(r3, text="Comment:", width=9).pack(side=tk.LEFT)
+        r3 = self._row(parent)
+        self._label(r3, "Comment:", width=_LW_9).pack(side=tk.LEFT)
         cv = tk.StringVar(value=node.comment); self._vars['comment'] = cv
-        ttk.Entry(r3, textvariable=cv).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self._entry(r3, cv).pack(side=tk.LEFT, fill=tk.X, expand=True)
         cv.trace_add('write', lambda *_: self._write_field(node, 'comment', cv.get(), is_attr=False))
 
     # ── Touch renderers ─────────────────────────────────────────
@@ -132,41 +199,37 @@ class PropertiesPanel(ttk.Frame):
     def _render_touch_screen(self, node: RobotNode):
         if not node.points:
             node.points = [[0, 0]]
-        lf = ttk.LabelFrame(self.inner, text="Touch Point")
-        lf.pack(fill=tk.X, padx=8, pady=4)
+        lf = self._section("Touch Point")
         self._point_row(lf, node, 0, "Point:")
 
     def _render_touch_area(self, node: RobotNode):
         while len(node.points) < 2:
             node.points.append([0, 0])
-        lf = ttk.LabelFrame(self.inner, text="Region (2 Points)")
-        lf.pack(fill=tk.X, padx=8, pady=4)
+        lf = self._section("Region (2 Points)")
         self._point_row(lf, node, 0, "Top-Left:")
         self._point_row(lf, node, 1, "Bot-Right:")
 
     def _render_swipe_screen(self, node: RobotNode):
         while len(node.points) < 2:
             node.points.append([0, 0])
-        lf = ttk.LabelFrame(self.inner, text="Swipe (Start → End)")
-        lf.pack(fill=tk.X, padx=8, pady=4)
+        lf = self._section("Swipe (Start → End)")
         self._point_row(lf, node, 0, "Start:")
         self._point_row(lf, node, 1, "End:")
 
     def _point_row(self, parent, node: RobotNode, pi: int, label: str):
-        r = ttk.Frame(parent); r.pack(fill=tk.X, padx=4, pady=2)
-        ttk.Label(r, text=label, width=10).pack(side=tk.LEFT)
-        ttk.Label(r, text="X:").pack(side=tk.LEFT)
+        r = self._row(parent)
+        self._label(r, label, width=_LW_10).pack(side=tk.LEFT)
+        self._label(r, "X:").pack(side=tk.LEFT)
         xv = tk.StringVar(value=str(node.points[pi][0]))
         self._vars[f'pt{pi}x'] = xv
-        ttk.Entry(r, textvariable=xv, width=7).pack(side=tk.LEFT, padx=(0, 8))
-        ttk.Label(r, text="Y:").pack(side=tk.LEFT)
+        self._entry(r, xv, width=70).pack(side=tk.LEFT, padx=(0, 8))
+        self._label(r, "Y:").pack(side=tk.LEFT)
         yv = tk.StringVar(value=str(node.points[pi][1]))
         self._vars[f'pt{pi}y'] = yv
-        ttk.Entry(r, textvariable=yv, width=7).pack(side=tk.LEFT, padx=(0, 8))
+        self._entry(r, yv, width=70).pack(side=tk.LEFT, padx=(0, 8))
 
-        ttk.Button(
-            r, text="Pick from Screen", width=16,
-            command=lambda: self._pick_coordinate(xv, yv),
+        self._button(
+            r, "Pick from Screen", lambda: self._pick_coordinate(xv, yv), width=140,
         ).pack(side=tk.LEFT)
 
         def _xch(*_, i=pi):
@@ -233,102 +296,92 @@ class PropertiesPanel(ttk.Frame):
     # ── Action renderers ────────────────────────────────────────
 
     def _render_button(self, node: RobotNode):
-        lf = ttk.LabelFrame(self.inner, text="Button")
-        lf.pack(fill=tk.X, padx=8, pady=4)
+        lf = self._section("Button")
 
-        r = ttk.Frame(lf); r.pack(fill=tk.X, padx=4, pady=2)
-        ttk.Label(r, text="Key:", width=9).pack(side=tk.LEFT)
+        r = self._row(lf)
+        self._label(r, "Key:", width=_LW_9).pack(side=tk.LEFT)
         kv = tk.StringVar(value=node.attrs.get('key', 'Play'))
         self._vars['key'] = kv
-        ttk.Combobox(r, textvariable=kv, values=BUTTON_KEYS,
-                     state='normal', width=18).pack(side=tk.LEFT)
+        self._combo(r, kv, BUTTON_KEYS, width=170, readonly=False).pack(side=tk.LEFT)
         kv.trace_add('write', lambda *_: self._write_attr(node, 'key', kv.get()))
 
-        r2 = ttk.Frame(lf); r2.pack(fill=tk.X, padx=4, pady=2)
-        ttk.Label(r2, text="Value:", width=9).pack(side=tk.LEFT)
+        r2 = self._row(lf)
+        self._label(r2, "Value:", width=_LW_9).pack(side=tk.LEFT)
         vv = tk.StringVar(value=node.attrs.get('value', ''))
         self._vars['btn_val'] = vv
-        ttk.Entry(r2, textvariable=vv, width=12).pack(side=tk.LEFT)
-        ttk.Label(r2, text="  optional numeric", foreground="#888").pack(side=tk.LEFT)
+        self._entry(r2, vv, width=110).pack(side=tk.LEFT)
+        self._label(r2, "  optional numeric", muted=True).pack(side=tk.LEFT)
         vv.trace_add('write', lambda *_: self._write_attr(node, 'value', vv.get()))
 
     def _render_wait(self, node: RobotNode):
-        lf = ttk.LabelFrame(self.inner, text="Wait")
-        lf.pack(fill=tk.X, padx=8, pady=4)
+        lf = self._section("Wait")
 
-        r = ttk.Frame(lf); r.pack(fill=tk.X, padx=4, pady=2)
-        ttk.Label(r, text="Timeout:", width=10).pack(side=tk.LEFT)
+        r = self._row(lf)
+        self._label(r, "Timeout:", width=_LW_10).pack(side=tk.LEFT)
         tv = tk.StringVar(value=node.attrs.get('timeout', '3'))
         self._vars['w_timeout'] = tv
-        ttk.Entry(r, textvariable=tv, width=8).pack(side=tk.LEFT, padx=(0, 8))
-        ttk.Label(r, text="Units:").pack(side=tk.LEFT)
+        self._entry(r, tv, width=80).pack(side=tk.LEFT, padx=(0, 8))
+        self._label(r, "Units:").pack(side=tk.LEFT)
         uv = tk.StringVar(value=node.attrs.get('units', 'Seconds'))
         self._vars['w_units'] = uv
-        ttk.Combobox(r, textvariable=uv, values=['', 'Seconds', 'Minutes'],
-                     state='readonly', width=10).pack(side=tk.LEFT)
-        ttk.Label(r, text="  blank=ms", foreground="#888").pack(side=tk.LEFT)
+        self._combo(r, uv, ['', 'Seconds', 'Minutes'], width=110).pack(side=tk.LEFT)
+        self._label(r, "  blank=ms", muted=True).pack(side=tk.LEFT)
         tv.trace_add('write', lambda *_: self._write_attr(node, 'timeout', tv.get()))
         uv.trace_add('write', lambda *_: self._write_attr(node, 'units', uv.get()))
 
-        r2 = ttk.Frame(lf); r2.pack(fill=tk.X, padx=4, pady=2)
-        ttk.Label(r2, text="State:", width=10).pack(side=tk.LEFT)
+        r2 = self._row(lf)
+        self._label(r2, "State:", width=_LW_10).pack(side=tk.LEFT)
         sv = tk.StringVar(value=node.attrs.get('state', ''))
         self._vars['w_state'] = sv
-        ttk.Combobox(r2, textvariable=sv, values=['', *GAME_STATES],
-                     state='readonly', width=18).pack(side=tk.LEFT)
-        ttk.Label(r2, text="  blank = run always", foreground="#888").pack(side=tk.LEFT)
+        self._combo(r2, sv, ['', *GAME_STATES], width=170).pack(side=tk.LEFT)
+        self._label(r2, "  blank = run always", muted=True).pack(side=tk.LEFT)
         sv.trace_add('write', lambda *_: self._write_attr(node, 'state', sv.get()))
 
     def _render_insert_credit(self, node: RobotNode):
-        lf = ttk.LabelFrame(self.inner, text="Insert Credit")
-        lf.pack(fill=tk.X, padx=8, pady=4)
+        lf = self._section("Insert Credit")
         for label, key, default in [
             ("Value:", "value", "2048"),
             ("When Below:", "when_below", "512"),
         ]:
-            r = ttk.Frame(lf); r.pack(fill=tk.X, padx=4, pady=2)
-            ttk.Label(r, text=label, width=12).pack(side=tk.LEFT)
+            r = self._row(lf)
+            self._label(r, label, width=_LW_12).pack(side=tk.LEFT)
             v = tk.StringVar(value=node.attrs.get(key, default))
             self._vars[key] = v
-            ttk.Entry(r, textvariable=v, width=10).pack(side=tk.LEFT)
+            self._entry(r, v, width=90).pack(side=tk.LEFT)
             v.trace_add('write', lambda *_, k=key, var=v: self._write_attr(node, k, var.get()))
 
     def _render_door(self, node: RobotNode):
-        lf = ttk.LabelFrame(self.inner, text="Door")
-        lf.pack(fill=tk.X, padx=8, pady=4)
+        lf = self._section("Door")
 
-        r = ttk.Frame(lf); r.pack(fill=tk.X, padx=4, pady=2)
-        ttk.Label(r, text="Door:", width=8).pack(side=tk.LEFT)
+        r = self._row(lf)
+        self._label(r, "Door:", width=_LW_8).pack(side=tk.LEFT)
         dv = tk.StringVar(value=node.attrs.get('door', 'Logic'))
         self._vars['door'] = dv
-        ttk.Combobox(r, textvariable=dv, values=DOOR_NAMES,
-                     state='readonly', width=24).pack(side=tk.LEFT)
+        self._combo(r, dv, DOOR_NAMES, width=210).pack(side=tk.LEFT)
         dv.trace_add('write', lambda *_: self._write_attr(node, 'door', dv.get()))
 
-        r2 = ttk.Frame(lf); r2.pack(fill=tk.X, padx=4, pady=2)
-        ttk.Label(r2, text="Open:", width=8).pack(side=tk.LEFT)
+        r2 = self._row(lf)
+        self._label(r2, "Open:", width=_LW_8).pack(side=tk.LEFT)
         ov = tk.StringVar(value=node.attrs.get('open', 'True'))
         self._vars['door_open'] = ov
-        ttk.Combobox(r2, textvariable=ov, values=['True', 'False'],
-                     state='readonly', width=10).pack(side=tk.LEFT)
+        self._combo(r2, ov, ['True', 'False'], width=110).pack(side=tk.LEFT)
         ov.trace_add('write', lambda *_: self._write_attr(node, 'open', ov.get()))
 
     def _render_switch(self, node: RobotNode):
-        lf = ttk.LabelFrame(self.inner, text="Switch")
-        lf.pack(fill=tk.X, padx=8, pady=4)
+        lf = self._section("Switch")
 
-        r = ttk.Frame(lf); r.pack(fill=tk.X, padx=4, pady=2)
-        ttk.Label(r, text="Switch #:", width=10).pack(side=tk.LEFT)
+        r = self._row(lf)
+        self._label(r, "Switch #:", width=_LW_10).pack(side=tk.LEFT)
         sv = tk.StringVar(value=node.attrs.get('switch', '2'))
         self._vars['switch_n'] = sv
-        ttk.Entry(r, textvariable=sv, width=6).pack(side=tk.LEFT)
-        ttk.Label(r, text="  1=jackpot  2=audit  (1–5)", foreground="#888").pack(side=tk.LEFT)
+        self._entry(r, sv, width=60).pack(side=tk.LEFT)
+        self._label(r, "  1=jackpot  2=audit  (1–5)", muted=True).pack(side=tk.LEFT)
         sv.trace_add('write', lambda *_: self._write_attr(node, 'switch', sv.get()))
 
-        r2 = ttk.Frame(lf); r2.pack(fill=tk.X, padx=4, pady=2)
+        r2 = self._row(lf)
         offv = tk.BooleanVar(value=bool(node.attrs.get('off', '')))
         self._vars['switch_off'] = offv
-        ttk.Checkbutton(r2, text="Turn Off (switch off=True)", variable=offv).pack(side=tk.LEFT)
+        self._check(r2, "Turn Off (switch off=True)", offv).pack(side=tk.LEFT)
 
         def _off_change(*_):
             node.attrs['off'] = 'True' if offv.get() else ''
@@ -336,71 +389,65 @@ class PropertiesPanel(ttk.Frame):
         offv.trace_add('write', _off_change)
 
     def _render_random_credit(self, node: RobotNode):
-        lf = ttk.LabelFrame(self.inner, text="Random Credit")
-        lf.pack(fill=tk.X, padx=8, pady=4)
-        r = ttk.Frame(lf); r.pack(fill=tk.X, padx=4, pady=2)
-        ttk.Label(r, text="Range:", width=8).pack(side=tk.LEFT)
+        lf = self._section("Random Credit")
+        r = self._row(lf)
+        self._label(r, "Range:", width=_LW_8).pack(side=tk.LEFT)
         rv = tk.StringVar(value=node.attrs.get('range', '100'))
         self._vars['rc_range'] = rv
-        ttk.Entry(r, textvariable=rv, width=8).pack(side=tk.LEFT)
+        self._entry(r, rv, width=80).pack(side=tk.LEFT)
         rv.trace_add('write', lambda *_: self._write_attr(node, 'range', rv.get()))
 
     def _render_scheduled(self, node: RobotNode):
-        lf = ttk.LabelFrame(self.inner, text="Scheduled")
-        lf.pack(fill=tk.X, padx=8, pady=4)
-        r = ttk.Frame(lf); r.pack(fill=tk.X, padx=4, pady=2)
-        ttk.Label(r, text="Timeout:", width=10).pack(side=tk.LEFT)
+        lf = self._section("Scheduled")
+        r = self._row(lf)
+        self._label(r, "Timeout:", width=_LW_10).pack(side=tk.LEFT)
         tv = tk.StringVar(value=node.attrs.get('timeout', '60'))
         self._vars['sched_t'] = tv
-        ttk.Entry(r, textvariable=tv, width=8).pack(side=tk.LEFT, padx=(0, 8))
-        ttk.Label(r, text="Units:").pack(side=tk.LEFT)
+        self._entry(r, tv, width=80).pack(side=tk.LEFT, padx=(0, 8))
+        self._label(r, "Units:").pack(side=tk.LEFT)
         uv = tk.StringVar(value=node.attrs.get('units', 'Seconds'))
         self._vars['sched_u'] = uv
-        ttk.Combobox(r, textvariable=uv, values=['Seconds', 'Minutes'],
-                     state='readonly', width=10).pack(side=tk.LEFT)
+        self._combo(r, uv, ['Seconds', 'Minutes'], width=110).pack(side=tk.LEFT)
         tv.trace_add('write', lambda *_: self._write_attr(node, 'timeout', tv.get()))
         uv.trace_add('write', lambda *_: self._write_attr(node, 'units', uv.get()))
 
     # ── Special renderers ───────────────────────────────────────
 
     def _render_output(self, node: RobotNode):
-        lf = ttk.LabelFrame(self.inner, text="Output / Log")
-        lf.pack(fill=tk.X, padx=8, pady=4)
+        lf = self._section("Output / Log")
 
         mode_var = tk.StringVar(value=node.attrs.get('mode', 'file'))
         self._vars['out_mode'] = mode_var
 
-        mode_row = ttk.Frame(lf); mode_row.pack(fill=tk.X, padx=4, pady=(4, 2))
-        ttk.Label(mode_row, text="Mode:", width=9).pack(side=tk.LEFT)
-        ttk.Radiobutton(mode_row, text="File", variable=mode_var, value='file').pack(side=tk.LEFT)
-        ttk.Radiobutton(mode_row, text="TCP Socket", variable=mode_var,
-                        value='socket').pack(side=tk.LEFT, padx=8)
+        mode_row = self._row(lf, pady=(4, 2))
+        self._label(mode_row, "Mode:", width=_LW_9).pack(side=tk.LEFT)
+        self._radio(mode_row, "File", mode_var, 'file').pack(side=tk.LEFT)
+        self._radio(mode_row, "TCP Socket", mode_var, 'socket').pack(side=tk.LEFT, padx=8)
 
         # File mode frame
-        file_frame = ttk.Frame(lf)
-        r = ttk.Frame(file_frame); r.pack(fill=tk.X, padx=4, pady=2)
-        ttk.Label(r, text="Filename:", width=10).pack(side=tk.LEFT)
+        file_frame = ctk.CTkFrame(lf, fg_color="transparent")
+        r = self._row(file_frame)
+        self._label(r, "Filename:", width=_LW_10).pack(side=tk.LEFT)
         fv = tk.StringVar(value=node.attrs.get('filename', 'robotlogs/eventsfile.txt'))
         self._vars['out_fn'] = fv
-        ttk.Entry(r, textvariable=fv).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self._entry(r, fv).pack(side=tk.LEFT, fill=tk.X, expand=True)
         fv.trace_add('write', lambda *_: self._write_attr(node, 'filename', fv.get()))
 
-        r2 = ttk.Frame(file_frame); r2.pack(fill=tk.X, padx=4, pady=2)
-        ttk.Label(r2, text="Append:", width=10).pack(side=tk.LEFT)
+        r2 = self._row(file_frame)
+        self._label(r2, "Append:", width=_LW_10).pack(side=tk.LEFT)
         av = tk.StringVar(value=node.attrs.get('append', 'False'))
         self._vars['out_app'] = av
-        ttk.Combobox(r2, textvariable=av, values=['False', 'True'],
-                     state='readonly', width=8).pack(side=tk.LEFT)
+        self._combo(r2, av, ['False', 'True'], width=95).pack(side=tk.LEFT)
         av.trace_add('write', lambda *_: self._write_attr(node, 'append', av.get()))
 
         # Socket mode frame
-        socket_frame = ttk.Frame(lf)
-        rs = ttk.Frame(socket_frame); rs.pack(fill=tk.X, padx=4, pady=2)
-        ttk.Label(rs, text="Address:", width=10).pack(side=tk.LEFT)
+        socket_frame = ctk.CTkFrame(lf, fg_color="transparent")
+        rs = self._row(socket_frame)
+        self._label(rs, "Address:", width=_LW_10).pack(side=tk.LEFT)
         addr_v = tk.StringVar(value=node.attrs.get('address', ''))
         self._vars['out_addr'] = addr_v
-        ttk.Entry(rs, textvariable=addr_v, width=22).pack(side=tk.LEFT)
-        ttk.Label(rs, text="  ip:port", foreground="#888").pack(side=tk.LEFT)
+        self._entry(rs, addr_v, width=200).pack(side=tk.LEFT)
+        self._label(rs, "  ip:port", muted=True).pack(side=tk.LEFT)
         addr_v.trace_add('write', lambda *_: self._write_attr(node, 'address', addr_v.get()))
 
         def _mode_changed(*_):
@@ -423,52 +470,45 @@ class PropertiesPanel(ttk.Frame):
 
     def _render_meter_list(self, node: RobotNode):
         # Settings section
-        sf = ttk.LabelFrame(self.inner, text="Meter List Settings")
-        sf.pack(fill=tk.X, padx=8, pady=4)
+        sf = self._section("Meter List Settings")
 
         # Trigger mode toggle
         mode_var = tk.StringVar(value=node.attrs.get('mode', 'periodic'))
         self._vars['ml_mode'] = mode_var
-        mr = ttk.Frame(sf); mr.pack(fill=tk.X, padx=4, pady=(4, 2))
-        ttk.Label(mr, text="Trigger:", width=10).pack(side=tk.LEFT)
-        ttk.Radiobutton(mr, text="Periodic (timeout)", variable=mode_var,
-                        value='periodic').pack(side=tk.LEFT)
-        ttk.Radiobutton(mr, text="State change", variable=mode_var,
-                        value='state').pack(side=tk.LEFT, padx=8)
+        mr = self._row(sf, pady=(4, 2))
+        self._label(mr, "Trigger:", width=_LW_10).pack(side=tk.LEFT)
+        self._radio(mr, "Periodic (timeout)", mode_var, 'periodic').pack(side=tk.LEFT)
+        self._radio(mr, "State change", mode_var, 'state').pack(side=tk.LEFT, padx=8)
 
         # Periodic frame
-        periodic_frame = ttk.Frame(sf)
-        r = ttk.Frame(periodic_frame); r.pack(fill=tk.X, padx=4, pady=2)
-        ttk.Label(r, text="Timeout:", width=10).pack(side=tk.LEFT)
+        periodic_frame = ctk.CTkFrame(sf, fg_color="transparent")
+        r = self._row(periodic_frame)
+        self._label(r, "Timeout:", width=_LW_10).pack(side=tk.LEFT)
         tv = tk.StringVar(value=node.attrs.get('timeout', '15'))
         self._vars['ml_t'] = tv
-        ttk.Entry(r, textvariable=tv, width=6).pack(side=tk.LEFT, padx=(0, 8))
-        ttk.Label(r, text="Units:").pack(side=tk.LEFT)
+        self._entry(r, tv, width=60).pack(side=tk.LEFT, padx=(0, 8))
+        self._label(r, "Units:").pack(side=tk.LEFT)
         uv = tk.StringVar(value=node.attrs.get('units', 'Seconds'))
         self._vars['ml_u'] = uv
-        ttk.Combobox(r, textvariable=uv, values=['Seconds', 'Minutes'],
-                     state='readonly', width=10).pack(side=tk.LEFT)
+        self._combo(r, uv, ['Seconds', 'Minutes'], width=110).pack(side=tk.LEFT)
         tv.trace_add('write', lambda *_: self._write_attr(node, 'timeout', tv.get()))
         uv.trace_add('write', lambda *_: self._write_attr(node, 'units', uv.get()))
 
         # State frame
-        state_frame = ttk.Frame(sf)
-        r_s = ttk.Frame(state_frame); r_s.pack(fill=tk.X, padx=4, pady=2)
-        ttk.Label(r_s, text="State:", width=10).pack(side=tk.LEFT)
+        state_frame = ctk.CTkFrame(sf, fg_color="transparent")
+        r_s = self._row(state_frame)
+        self._label(r_s, "State:", width=_LW_10).pack(side=tk.LEFT)
         sv = tk.StringVar(value=node.attrs.get('state', 'Game-Idle'))
         self._vars['ml_state'] = sv
-        ttk.Combobox(r_s, textvariable=sv, values=GAME_STATES,
-                     state='readonly', width=18).pack(side=tk.LEFT)
+        self._combo(r_s, sv, GAME_STATES, width=170).pack(side=tk.LEFT)
         sv.trace_add('write', lambda *_: self._write_attr(node, 'state', sv.get()))
 
-        r_ol = ttk.Frame(state_frame); r_ol.pack(fill=tk.X, padx=4, pady=2)
-        ttk.Label(r_ol, text="On-Leave:", width=10).pack(side=tk.LEFT)
+        r_ol = self._row(state_frame)
+        self._label(r_ol, "On-Leave:", width=_LW_10).pack(side=tk.LEFT)
         olv = tk.StringVar(value=node.attrs.get('on_leave', 'False'))
         self._vars['ml_ol'] = olv
-        ttk.Combobox(r_ol, textvariable=olv, values=['False', 'True'],
-                     state='readonly', width=8).pack(side=tk.LEFT)
-        ttk.Label(r_ol, text="  True = fire when leaving state",
-                  foreground="#888").pack(side=tk.LEFT)
+        self._combo(r_ol, olv, ['False', 'True'], width=95).pack(side=tk.LEFT)
+        self._label(r_ol, "  True = fire when leaving state", muted=True).pack(side=tk.LEFT)
         olv.trace_add('write', lambda *_: self._write_attr(node, 'on_leave', olv.get()))
 
         def _ml_mode_changed(*_):
@@ -493,36 +533,33 @@ class PropertiesPanel(ttk.Frame):
         out_mode_var = tk.StringVar(value=node.attrs.get('output_mode', 'file'))
         self._vars['ml_out_mode'] = out_mode_var
 
-        om_row = ttk.Frame(sf); om_row.pack(fill=tk.X, padx=4, pady=(6, 2))
-        ttk.Label(om_row, text="Output:", width=10).pack(side=tk.LEFT)
-        ttk.Radiobutton(om_row, text="File", variable=out_mode_var,
-                        value='file').pack(side=tk.LEFT)
-        ttk.Radiobutton(om_row, text="TCP Socket", variable=out_mode_var,
-                        value='socket').pack(side=tk.LEFT, padx=8)
+        om_row = self._row(sf, pady=(6, 2))
+        self._label(om_row, "Output:", width=_LW_10).pack(side=tk.LEFT)
+        self._radio(om_row, "File", out_mode_var, 'file').pack(side=tk.LEFT)
+        self._radio(om_row, "TCP Socket", out_mode_var, 'socket').pack(side=tk.LEFT, padx=8)
 
-        ml_file_frame = ttk.Frame(sf)
-        r2 = ttk.Frame(ml_file_frame); r2.pack(fill=tk.X, padx=4, pady=2)
-        ttk.Label(r2, text="Log File:", width=10).pack(side=tk.LEFT)
+        ml_file_frame = ctk.CTkFrame(sf, fg_color="transparent")
+        r2 = self._row(ml_file_frame)
+        self._label(r2, "Log File:", width=_LW_10).pack(side=tk.LEFT)
         fnv = tk.StringVar(value=node.attrs.get('output_filename', 'robotlogs/eventsfile.txt'))
         self._vars['ml_fn'] = fnv
-        ttk.Entry(r2, textvariable=fnv).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self._entry(r2, fnv).pack(side=tk.LEFT, fill=tk.X, expand=True)
         fnv.trace_add('write', lambda *_: self._write_attr(node, 'output_filename', fnv.get()))
 
-        r3 = ttk.Frame(ml_file_frame); r3.pack(fill=tk.X, padx=4, pady=2)
-        ttk.Label(r3, text="Append:", width=10).pack(side=tk.LEFT)
+        r3 = self._row(ml_file_frame)
+        self._label(r3, "Append:", width=_LW_10).pack(side=tk.LEFT)
         apv = tk.StringVar(value=node.attrs.get('output_append', 'False'))
         self._vars['ml_ap'] = apv
-        ttk.Combobox(r3, textvariable=apv, values=['False', 'True'],
-                     state='readonly', width=8).pack(side=tk.LEFT)
+        self._combo(r3, apv, ['False', 'True'], width=95).pack(side=tk.LEFT)
         apv.trace_add('write', lambda *_: self._write_attr(node, 'output_append', apv.get()))
 
-        ml_socket_frame = ttk.Frame(sf)
-        rs = ttk.Frame(ml_socket_frame); rs.pack(fill=tk.X, padx=4, pady=2)
-        ttk.Label(rs, text="Address:", width=10).pack(side=tk.LEFT)
+        ml_socket_frame = ctk.CTkFrame(sf, fg_color="transparent")
+        rs = self._row(ml_socket_frame)
+        self._label(rs, "Address:", width=_LW_10).pack(side=tk.LEFT)
         addr_v = tk.StringVar(value=node.attrs.get('output_address', ''))
         self._vars['ml_addr'] = addr_v
-        ttk.Entry(rs, textvariable=addr_v, width=22).pack(side=tk.LEFT)
-        ttk.Label(rs, text="  ip:port", foreground="#888").pack(side=tk.LEFT)
+        self._entry(rs, addr_v, width=200).pack(side=tk.LEFT)
+        self._label(rs, "  ip:port", muted=True).pack(side=tk.LEFT)
         addr_v.trace_add('write', lambda *_: self._write_attr(node, 'output_address', addr_v.get()))
 
         def _ml_out_mode_changed(*_):
@@ -544,11 +581,9 @@ class PropertiesPanel(ttk.Frame):
             ml_file_frame.pack(fill=tk.X)
 
         # Meters section
-        mf = ttk.LabelFrame(self.inner, text="Meters (check to include)")
-        mf.pack(fill=tk.X, padx=8, pady=4)
+        mf = self._section("Meters (check to include)")
 
-        btn_row = ttk.Frame(mf)
-        btn_row.pack(fill=tk.X, padx=4, pady=(4, 2))
+        btn_row = self._row(mf, pady=(4, 2))
 
         selected = set(node.attrs.get('meters') or ALL_METERS)
         meter_vars: dict = {}
@@ -561,10 +596,10 @@ class PropertiesPanel(ttk.Frame):
             for v in meter_vars.values():
                 v.set(False)
 
-        ttk.Button(btn_row, text="Select All", command=_select_all, width=11).pack(side=tk.LEFT, padx=2)
-        ttk.Button(btn_row, text="Clear All",  command=_clear_all,  width=11).pack(side=tk.LEFT)
+        self._button(btn_row, "Select All", _select_all, width=100).pack(side=tk.LEFT, padx=2)
+        self._button(btn_row, "Clear All",  _clear_all,  width=100).pack(side=tk.LEFT)
 
-        grid = ttk.Frame(mf)
+        grid = ctk.CTkFrame(mf, fg_color="transparent")
         grid.pack(fill=tk.X, padx=4, pady=4)
         cols = 3
         for i, meter in enumerate(ALL_METERS):
@@ -577,22 +612,21 @@ class PropertiesPanel(ttk.Frame):
                 self._schedule()
 
             bv.trace_add('write', _meter_changed)
-            ttk.Checkbutton(grid, text=meter, variable=bv).grid(
+            self._check(grid, meter, bv).grid(
                 row=i // cols, column=i % cols, sticky="w", padx=4, pady=1)
 
     def _render_state_filter(self, node: RobotNode):
         """State-list filter shown at the bottom of every event's property form."""
-        lf = ttk.LabelFrame(self.inner, text="State Filter (state-list)")
-        lf.pack(fill=tk.X, padx=8, pady=4)
+        lf = self._section("State Filter (state-list)")
 
         enabled = node.state_filter is not None
         en_var = tk.BooleanVar(value=enabled)
         self._vars['sf_enabled'] = en_var
 
-        en_row = ttk.Frame(lf); en_row.pack(fill=tk.X, padx=4, pady=(4, 2))
+        en_row = self._row(lf, pady=(4, 2))
 
         # Content frame — shown only when enabled
-        content = ttk.Frame(lf)
+        content = ctk.CTkFrame(lf, fg_color="transparent")
 
         sf = node.state_filter or {}
         type_var = tk.StringVar(value=sf.get('type', 'White'))
@@ -609,21 +643,20 @@ class PropertiesPanel(ttk.Frame):
                 node.state_filter = None
             self._schedule()
 
-        type_row = ttk.Frame(content); type_row.pack(fill=tk.X, padx=4, pady=2)
-        ttk.Label(type_row, text="Type:", width=8).pack(side=tk.LEFT)
+        type_row = self._row(content)
+        self._label(type_row, "Type:", width=_LW_8).pack(side=tk.LEFT)
         for t in ('White', 'Black'):
-            ttk.Radiobutton(type_row, text=t, variable=type_var, value=t,
-                            command=_update_filter).pack(side=tk.LEFT, padx=4)
-        ttk.Label(type_row, text="  White=allow  Black=block",
-                  foreground="#888").pack(side=tk.LEFT)
+            self._radio(type_row, t, type_var, t, command=_update_filter).pack(side=tk.LEFT, padx=4)
+        self._label(type_row, "  White=allow  Black=block", muted=True).pack(side=tk.LEFT)
 
-        grid = ttk.Frame(content); grid.pack(fill=tk.X, padx=4, pady=(0, 4))
+        grid = ctk.CTkFrame(content, fg_color="transparent")
+        grid.pack(fill=tk.X, padx=4, pady=(0, 4))
         for i, state in enumerate(GAME_STATES):
             bv = tk.BooleanVar(value=(state in current_states))
             state_vars[state] = bv
             self._vars[f'sf_{i}'] = bv
             bv.trace_add('write', _update_filter)
-            ttk.Checkbutton(grid, text=state, variable=bv).grid(
+            self._check(grid, state, bv).grid(
                 row=i // 3, column=i % 3, sticky="w", padx=4, pady=1)
 
         def _toggle_enabled():
@@ -633,8 +666,8 @@ class PropertiesPanel(ttk.Frame):
                 content.pack_forget()
             _update_filter()
 
-        ttk.Checkbutton(en_row, text="Enable state filter", variable=en_var,
-                        command=_toggle_enabled).pack(side=tk.LEFT)
+        self._check(en_row, "Enable state filter", en_var,
+                    command=_toggle_enabled).pack(side=tk.LEFT)
 
         if enabled:
             content.pack(fill=tk.X)
