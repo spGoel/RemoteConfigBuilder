@@ -1,16 +1,29 @@
 """
 Aristocrat Robot Tools - tabbed top-level launcher.
-Each tool runs inside one shared window instead of opening a new process/window.
+Each tool runs inside one shared CustomTkinter window instead of opening a
+new process/window. Tools that have not been ported yet still mount as plain
+tkinter frames inside their tab.
 """
 import importlib.util
 import sys
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import messagebox
 from pathlib import Path
 
-BASE_DIR = Path(__file__).parent
+BASE_DIR = Path(__file__).resolve().parent
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
 
-# Palette shared with the tools.
+try:
+    import customtkinter as ctk
+except ImportError:  # pragma: no cover - reported by launch.bat
+    print("customtkinter is not installed. Run:  python -m pip install -r requirements.txt")
+    raise
+
+from common import theme, widgets
+from common.widgets import font
+
+# Palette kept for tools that still use the plain-tk look.
 C_ACCENT = "#5B3EA6"
 C_ACCENT_L = "#7457C4"
 C_BG = "#F3F0FA"
@@ -85,77 +98,110 @@ def _load_tool_class(tool: dict):
     return getattr(module, tool["class_name"])
 
 
-class LauncherApp(tk.Tk):
+class LauncherApp(ctk.CTk):
     def __init__(self):
         super().__init__()
+        ctk.set_appearance_mode("System")
+        ctk.set_default_color_theme("blue")
+        widgets.init_styles(self)
+
         self.title("Aristocrat Robot Tools")
-        self.geometry("1320x820")
-        self.minsize(980, 640)
-        self.configure(bg=C_BG)
         self._tool_apps = {}
 
-        self._configure_styles()
+        self._apply_initial_geometry()
         self._build_ui()
-        self._center()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
-    def _configure_styles(self):
-        self._style = ttk.Style(self)
-        self._style.configure(
-            "RobotTools.TNotebook",
-            background=C_BG,
-            borderwidth=0,
-            tabmargins=(8, 8, 8, 0),
-        )
-        self._style.configure(
-            "RobotTools.TNotebook.Tab",
-            font=("Segoe UI", 11, "bold"),
-            padding=(28, 12),
-        )
-        self._style.map(
-            "RobotTools.TNotebook.Tab",
-            background=[("selected", C_SURFACE)],
-            foreground=[("selected", C_ACCENT), ("!selected", C_TEXT)],
-        )
-        self._style.configure("RobotTools.TFrame", background=C_BG)
+    # ------------------------------------------------------------------
+    # Geometry
+    # ------------------------------------------------------------------
+
+    def _apply_initial_geometry(self):
+        """Open maximised, sized from the real screen.
+
+        CustomTkinter multiplies geometry() by its DPI scaling factor, so the
+        old fixed 1320x820 would open far larger than intended on a scaled
+        display. Derive the fallback from the screen, then maximise.
+        """
+        scaling = theme.widget_scaling(self)
+        screen_w = self.winfo_screenwidth() / scaling
+        screen_h = self.winfo_screenheight() / scaling
+        width = int(min(1320, screen_w * 0.92))
+        height = int(min(820, screen_h * 0.90))
+        self.geometry("{}x{}+{}+{}".format(
+            width, height,
+            max(0, int((screen_w - width) / 2)),
+            max(0, int((screen_h - height) / 2)),
+        ))
+        self.minsize(int(min(980, screen_w * 0.6)), int(min(640, screen_h * 0.6)))
+        try:
+            self.state("zoomed")
+        except tk.TclError:
+            pass
+
+    # ------------------------------------------------------------------
+    # Layout
+    # ------------------------------------------------------------------
 
     def _build_ui(self):
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(1, weight=1)
         self._build_header()
         self._build_tabs()
 
     def _build_header(self):
-        hdr = tk.Frame(self, bg=C_ACCENT)
-        hdr.pack(fill=tk.X)
+        hdr = ctk.CTkFrame(self, fg_color=theme.ACCENT, corner_radius=0)
+        hdr.grid(row=0, column=0, sticky="ew")
+        hdr.columnconfigure(0, weight=1)
 
-        tk.Label(
-            hdr,
-            text="Aristocrat Robot Tools",
-            font=("Segoe UI", 15, "bold"),
-            bg=C_ACCENT,
-            fg=C_WHITE,
-            pady=12,
-        ).pack()
-
-        tk.Label(
-            hdr,
+        titles = ctk.CTkFrame(hdr, fg_color="transparent")
+        titles.grid(row=0, column=0, sticky="w", padx=18, pady=(12, 12))
+        ctk.CTkLabel(
+            titles, text="Aristocrat Robot Tools", font=font("title"),
+            text_color="#FFFFFF", anchor="w",
+        ).pack(anchor="w")
+        ctk.CTkLabel(
+            titles,
             text="Build robots, edit robot.xml, and monitor runs from one workspace",
-            font=("Segoe UI", 9),
-            bg=C_ACCENT,
-            fg="#C4B4F4",
-        ).pack()
+            font=font("small"), text_color="#C4B4F4", anchor="w",
+        ).pack(anchor="w")
 
-        tk.Frame(hdr, bg=C_ACCENT_L, height=3).pack(fill=tk.X, pady=(10, 0))
+        self.appearance = ctk.CTkSegmentedButton(
+            hdr, values=["Light", "Dark", "System"], command=self._set_appearance,
+            font=font("small"),
+            selected_color="#FFFFFF", selected_hover_color="#EFEAFB",
+            unselected_color=theme.ACCENT_HOVER, unselected_hover_color=("#7C5CD6", "#5B3EA6"),
+            text_color=(theme.ACCENT[0], "#FFFFFF"),
+        )
+        self.appearance.set("System")
+        self.appearance.grid(row=0, column=1, sticky="e", padx=18)
 
     def _build_tabs(self):
-        shell = tk.Frame(self, bg=C_BG, padx=10, pady=10)
-        shell.pack(fill=tk.BOTH, expand=True)
+        shell = ctk.CTkFrame(self, fg_color="transparent")
+        shell.grid(row=1, column=0, sticky="nsew", padx=10, pady=(6, 10))
+        shell.columnconfigure(0, weight=1)
+        shell.rowconfigure(0, weight=1)
 
-        self.notebook = ttk.Notebook(shell, style="RobotTools.TNotebook")
-        self.notebook.pack(fill=tk.BOTH, expand=True)
+        self.tabview = ctk.CTkTabview(
+            shell,
+            corner_radius=10,
+            fg_color=theme.CARD_BG,
+            segmented_button_fg_color=theme.SUNKEN_BG,
+            segmented_button_selected_color=theme.ACCENT,
+            segmented_button_selected_hover_color=theme.ACCENT_HOVER,
+            segmented_button_unselected_color=theme.SUNKEN_BG,
+            segmented_button_unselected_hover_color=theme.BORDER,
+            text_color=theme.BODY_FG,
+            text_color_disabled=theme.MUTED_FG,
+            anchor="w",
+        )
+        self.tabview.grid(row=0, column=0, sticky="nsew")
+        self.tabview._segmented_button.configure(font=font("heading"))
 
         for tool in TOOLS:
-            tab = ttk.Frame(self.notebook, style="RobotTools.TFrame")
-            self.notebook.add(tab, text=tool["title"])
+            tab = self.tabview.add(tool["title"])
+            tab.columnconfigure(0, weight=1)
+            tab.rowconfigure(2, weight=1)
             content = self._tab_content(tab, tool)
             if tool["available"]:
                 self._mount_tool(content, tool)
@@ -163,30 +209,21 @@ class LauncherApp(tk.Tk):
                 self._placeholder(content, tool)
 
     def _tab_content(self, tab, tool: dict):
-        header = tk.Frame(tab, bg=C_SURFACE, padx=18, pady=12)
-        header.pack(fill=tk.X)
+        header = ctk.CTkFrame(tab, fg_color="transparent")
+        header.grid(row=0, column=0, sticky="ew", padx=14, pady=(6, 4))
+        ctk.CTkLabel(
+            header, text=tool["title"], font=font("heading"), anchor="w",
+        ).pack(side="left")
+        ctk.CTkLabel(
+            header, text=tool.get("subtitle", ""), font=font("small"),
+            text_color=theme.MUTED_FG, anchor="w",
+        ).pack(side="left", padx=(14, 0))
 
-        tk.Label(
-            header,
-            text=tool["title"],
-            font=("Segoe UI", 13, "bold"),
-            bg=C_SURFACE,
-            fg=C_TEXT,
-            anchor="w",
-        ).pack(side=tk.LEFT)
+        ctk.CTkFrame(tab, fg_color=theme.BORDER, height=1, corner_radius=0).grid(
+            row=1, column=0, sticky="ew", padx=14)
 
-        tk.Label(
-            header,
-            text=tool.get("subtitle", ""),
-            font=("Segoe UI", 9),
-            bg=C_SURFACE,
-            fg=C_MUTED,
-            anchor="w",
-        ).pack(side=tk.LEFT, padx=(14, 0))
-
-        tk.Frame(tab, bg="#DDD9EF", height=1).pack(fill=tk.X)
-        content = tk.Frame(tab, bg=C_BG)
-        content.pack(fill=tk.BOTH, expand=True)
+        content = ctk.CTkFrame(tab, fg_color="transparent")
+        content.grid(row=2, column=0, sticky="nsew", padx=4, pady=(4, 4))
         return content
 
     def _mount_tool(self, tab, tool: dict):
@@ -199,38 +236,35 @@ class LauncherApp(tk.Tk):
             self._error_tab(tab, tool, exc)
 
     def _placeholder(self, tab, tool: dict):
-        body = tk.Frame(tab, bg=C_BG, padx=28, pady=24)
-        body.pack(fill=tk.BOTH, expand=True)
-        tk.Label(
-            body,
-            text="Coming soon.",
-            font=("Segoe UI", 11),
-            bg=C_BG,
-            fg=C_MUTED,
-            anchor="w",
-        ).pack(fill=tk.X)
+        ctk.CTkLabel(
+            tab, text="Coming soon.", font=font("body"),
+            text_color=theme.MUTED_FG, anchor="w",
+        ).pack(fill=tk.X, padx=28, pady=24)
 
     def _error_tab(self, tab, tool: dict, exc: Exception):
-        body = tk.Frame(tab, bg=C_SURFACE, padx=28, pady=24)
-        body.pack(fill=tk.BOTH, expand=True)
-        tk.Label(
-            body,
-            text=f"{tool['title']} could not be loaded",
-            font=("Segoe UI", 12, "bold"),
-            bg=C_SURFACE,
-            fg="#B71C1C",
-            anchor="w",
-        ).pack(fill=tk.X)
-        tk.Label(
-            body,
-            text=str(exc),
-            font=("Consolas", 9),
-            bg=C_SURFACE,
-            fg=C_TEXT,
-            justify=tk.LEFT,
-            anchor="w",
-            wraplength=900,
-        ).pack(fill=tk.X, pady=(8, 0))
+        body = ctk.CTkFrame(tab, fg_color=theme.CARD_BG, corner_radius=10)
+        body.pack(fill=tk.BOTH, expand=True, padx=14, pady=14)
+        ctk.CTkLabel(
+            body, text=f"{tool['title']} could not be loaded",
+            font=font("heading"), text_color=theme.ERR_FG, anchor="w",
+        ).pack(fill=tk.X, padx=18, pady=(18, 6))
+        ctk.CTkLabel(
+            body, text=str(exc), font=font("mono_small"), justify=tk.LEFT,
+            anchor="w", wraplength=900,
+        ).pack(fill=tk.X, padx=18, pady=(0, 18))
+
+    # ------------------------------------------------------------------
+    # Behaviour
+    # ------------------------------------------------------------------
+
+    def _set_appearance(self, mode: str):
+        ctk.set_appearance_mode(mode)
+        # ttk has no notion of appearance mode, so themed trees need repainting.
+        theme.style_treeview(self)
+        for app in self._tool_apps.values():
+            hook = getattr(app, "on_appearance_change", None)
+            if callable(hook):
+                hook(mode)
 
     def _on_close(self):
         config_app = self._tool_apps.get("config")
@@ -252,14 +286,6 @@ class LauncherApp(tk.Tk):
             memory_app.shutdown()
 
         self.destroy()
-
-    def _center(self):
-        self.update_idletasks()
-        sw = self.winfo_screenwidth()
-        sh = self.winfo_screenheight()
-        w = self.winfo_width()
-        h = self.winfo_height()
-        self.geometry(f"+{(sw - w) // 2}+{(sh - h) // 2}")
 
 
 if __name__ == "__main__":

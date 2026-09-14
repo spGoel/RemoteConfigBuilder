@@ -1,26 +1,31 @@
 """
 Aristocrat Robot Builder — upload Linux_BuildScript.sh to a remote Linux machine,
 run it inside a named GNU Screen session, stream live output back here.
+
+UI is CustomTkinter; everything from argument collection down to the SSH
+worker is unchanged from the plain-tkinter version.
 """
 import io
 import posixpath
 import subprocess
+import sys
 import tempfile
 import threading
 import time
 import tkinter as tk
-from tkinter import ttk, scrolledtext, messagebox
+from tkinter import messagebox
 from pathlib import Path
 from typing import Optional, Tuple
 
-# ── Palette ───────────────────────────────────────────────────────────────────
-C_ACCENT   = "#5B3EA6"
-C_ACCENT_L = "#7457C4"
-C_BG       = "#F3F0FA"
-C_SURFACE  = "#FFFFFF"
-C_TEXT     = "#1A1820"
-C_MUTED    = "#5C5870"
-C_WHITE    = "#FFFFFF"
+# The shared style layer lives at the repository root.
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+import customtkinter as ctk  # noqa: E402
+
+from common import theme, widgets  # noqa: E402
+from common.widgets import Card, LogPane, font  # noqa: E402
 
 # ── SSH credentials — always hardcoded, never prompted ────────────────────────
 SSH_USER = "mk7"
@@ -85,19 +90,26 @@ _URL_LABELS: dict = {
     "AVL": [("platform", "Platform"), ("gameplatform", "Game Platform"), ("game", "Game")],
 }
 
+_STOP_RED = ("#B71C1C", "#D64545")
+_STOP_RED_HOVER = ("#7F0000", "#A83232")
+_NEUTRAL = ("gray70", "gray35")
+_NEUTRAL_HOVER = ("gray60", "gray45")
 
-class RobotBuilderApp(tk.Frame):
+
+class RobotBuilderApp(ctk.CTkFrame):
     def __init__(self, master=None, standalone: bool = False):
         if master is None:
-            master = tk.Tk()
+            master = ctk.CTk()
+            ctk.set_appearance_mode("System")
+            ctk.set_default_color_theme("blue")
             standalone = True
-        super().__init__(master, bg=C_BG)
+        super().__init__(master, fg_color="transparent", corner_radius=0)
         self._standalone = standalone
         self._root_window = self.winfo_toplevel()
+        if not widgets.FONTS:
+            widgets.init_styles(self._root_window)
         if self._standalone:
             self._root_window.title("Aristocrat Robot Builder")
-            self._root_window.configure(bg=C_BG)
-            self._root_window.minsize(860, 700)
         self._stop_event   = threading.Event()
         self._build_active = False
         self._start_time   = 0.0
@@ -112,7 +124,7 @@ class RobotBuilderApp(tk.Frame):
         self._build_ui()
         if self._standalone:
             self.pack(fill=tk.BOTH, expand=True)
-            self._center()
+            self._apply_initial_geometry()
 
     # ── UI ────────────────────────────────────────────────────────────────────
 
@@ -120,8 +132,8 @@ class RobotBuilderApp(tk.Frame):
         if self._standalone:
             self._build_header()
         body_pad = 16 if self._standalone else 12
-        body = tk.Frame(self, bg=C_BG, padx=body_pad, pady=12)
-        body.pack(fill=tk.BOTH, expand=True)
+        body = ctk.CTkFrame(self, fg_color="transparent")
+        body.pack(fill=tk.BOTH, expand=True, padx=body_pad, pady=(10, 4))
         self._machine_section(body)
         self._config_section(body)
         self._action_bar(body)
@@ -129,85 +141,78 @@ class RobotBuilderApp(tk.Frame):
         self._status_bar()
 
     def _build_header(self):
-        hdr = tk.Frame(self, bg=C_ACCENT)
+        hdr = ctk.CTkFrame(self, fg_color=theme.ACCENT, corner_radius=0)
         hdr.pack(fill=tk.X)
-        tk.Label(hdr, text="Robot Builder",
-                 font=("Segoe UI", 15, "bold"),
-                 bg=C_ACCENT, fg=C_WHITE, pady=14).pack()
-        tk.Label(hdr, text="Build 3L / 5L / AVL robots on a remote Linux machine",
-                 font=("Segoe UI", 9), bg=C_ACCENT, fg="#C4B4F4").pack()
-        tk.Frame(hdr, bg=C_ACCENT_L, height=3).pack(fill=tk.X, pady=(10, 0))
+        ctk.CTkLabel(hdr, text="Robot Builder", font=font("title"),
+                     text_color="#FFFFFF").pack(pady=(14, 0))
+        ctk.CTkLabel(hdr, text="Build 3L / 5L / AVL robots on a remote Linux machine",
+                     font=font("small"), text_color="#C4B4F4").pack(pady=(0, 12))
 
-    def _card(self, parent, title: str) -> tk.Frame:
-        outer = tk.Frame(parent, bg=C_ACCENT, padx=1, pady=1)
-        outer.pack(fill=tk.X, pady=(0, 10))
-        tk.Label(outer, text=title, font=("Segoe UI", 9, "bold"),
-                 bg=C_ACCENT, fg=C_WHITE, anchor="w", padx=10, pady=4).pack(fill=tk.X)
-        inner = tk.Frame(outer, bg=C_SURFACE, padx=12, pady=10)
-        inner.pack(fill=tk.X)
-        return inner
+    def _card(self, parent, title: str) -> ctk.CTkFrame:
+        card = Card(parent, title=title)
+        card.pack(fill=tk.X, pady=(0, 10))
+        return card.body
+
+    def _label(self, parent, text: str, bold: bool = False, **kwargs) -> ctk.CTkLabel:
+        kwargs.setdefault("anchor", "w")
+        return ctk.CTkLabel(parent, text=text,
+                            font=font("heading") if bold else font("body"), **kwargs)
 
     def _machine_section(self, parent):
         f = self._card(parent, "Machine Settings")
-        row = tk.Frame(f, bg=C_SURFACE)
-        row.pack(fill=tk.X)
+        f.columnconfigure(1, weight=1)
 
-        ip_block = tk.Frame(row, bg=C_SURFACE)
-        ip_block.pack(side=tk.LEFT, fill=tk.X, padx=(0, 18))
-        tk.Label(ip_block, text="Machine IP",
-                 font=("Segoe UI", 9), bg=C_SURFACE, fg=C_TEXT, anchor="w"
-                 ).pack(fill=tk.X)
-        ip_row = tk.Frame(ip_block, bg=C_SURFACE)
+        ip_block = ctk.CTkFrame(f, fg_color="transparent")
+        ip_block.grid(row=0, column=0, sticky="w", padx=(0, 18))
+        self._label(ip_block, "Machine IP").pack(fill=tk.X)
+        ip_row = ctk.CTkFrame(ip_block, fg_color="transparent")
         ip_row.pack(fill=tk.X, pady=(2, 0))
         self._ip_var = tk.StringVar()
-        ttk.Entry(ip_row, textvariable=self._ip_var, width=22).pack(side=tk.LEFT)
-        tk.Label(ip_row, text="(mk7 / mk7)",
-                 font=("Segoe UI", 8, "italic"), bg=C_SURFACE, fg=C_MUTED
-                 ).pack(side=tk.LEFT, padx=8)
+        ctk.CTkEntry(ip_row, textvariable=self._ip_var, width=220, height=30,
+                     font=font("body")).pack(side=tk.LEFT)
+        ctk.CTkLabel(ip_row, text="(mk7 / mk7)", font=font("small"),
+                     text_color=theme.MUTED_FG).pack(side=tk.LEFT, padx=8)
 
-        path_block = tk.Frame(row, bg=C_SURFACE)
-        path_block.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        tk.Label(path_block, text="Remote Build Dir",
-                 font=("Segoe UI", 9), bg=C_SURFACE, fg=C_TEXT, anchor="w"
-                 ).pack(fill=tk.X)
+        path_block = ctk.CTkFrame(f, fg_color="transparent")
+        path_block.grid(row=0, column=1, sticky="ew")
+        self._label(path_block, "Remote Build Dir").pack(fill=tk.X)
         self._builddir_var = tk.StringVar(value=_DEFAULT_BUILDDIR)
-        ttk.Entry(path_block, textvariable=self._builddir_var).pack(
-            fill=tk.X, pady=(2, 0))
+        ctk.CTkEntry(path_block, textvariable=self._builddir_var, height=30,
+                     font=font("body")).pack(fill=tk.X, pady=(2, 0))
 
     def _config_section(self, parent):
         f = self._card(parent, "Build Configuration")
 
         self._build_options_section(f)
 
-        tk.Label(f, text="SVN Checkout URLs",
-                 font=("Segoe UI", 9, "bold"), bg=C_SURFACE, fg=C_TEXT,
-                 anchor="w").pack(fill=tk.X, pady=(8, 4))
+        self._label(f, "SVN Checkout URLs", bold=True).pack(fill=tk.X, pady=(10, 4))
 
         self._url_frames: dict = {}
-        container = tk.Frame(f, bg=C_SURFACE)
+        container = ctk.CTkFrame(f, fg_color="transparent")
         container.pack(fill=tk.X)
         self._url_container = container
 
         for level in BUILD_LEVELS:
-            frm = tk.Frame(container, bg=C_SURFACE)
+            frm = ctk.CTkFrame(container, fg_color="transparent")
             frm.columnconfigure(1, weight=1)
             self._url_frames[level] = frm
             for row_idx, (key, label) in enumerate(_URL_LABELS[level]):
-                tk.Label(frm, text=f"{label}:", width=16, anchor="w",
-                         font=("Segoe UI", 9), bg=C_SURFACE, fg=C_TEXT
-                         ).grid(row=row_idx, column=0, sticky="w", pady=2)
-                ttk.Entry(frm, textvariable=self._url_vars[level][key]
-                          ).grid(row=row_idx, column=1, sticky="ew", padx=4)
-                ttk.Button(
+                ctk.CTkLabel(frm, text=f"{label}:", width=128, anchor="w",
+                             font=font("body")).grid(row=row_idx, column=0, sticky="w", pady=2)
+                ctk.CTkEntry(frm, textvariable=self._url_vars[level][key], height=30,
+                             font=font("body")).grid(row=row_idx, column=1, sticky="ew", padx=4)
+                ctk.CTkButton(
                     frm,
                     text="Browse...",
+                    width=90, height=30, font=font("body"),
+                    fg_color=_NEUTRAL, hover_color=_NEUTRAL_HOVER, text_color=theme.BODY_FG,
                     command=lambda lvl=level, k=key, lbl=label: self._browse_svn_url(lvl, k, lbl),
                 ).grid(row=row_idx, column=2, sticky="e", padx=(4, 0), pady=2)
 
         self._url_frames[self._level_var.get()].pack(fill=tk.X)
 
     def _build_options_section(self, parent):
-        panel = tk.Frame(parent, bg=C_SURFACE)
+        panel = ctk.CTkFrame(parent, fg_color="transparent")
         panel.pack(fill=tk.X)
         panel.columnconfigure(0, weight=1)
         panel.columnconfigure(1, weight=1)
@@ -227,11 +232,11 @@ class RobotBuilderApp(tk.Frame):
         )
         target_block.grid(row=0, column=0, sticky="ew", padx=(0, 10))
 
-        level_block, level_combo = self._combo_block(
-            panel, "Build Type", self._level_var, BUILD_LEVELS
+        level_block, _level_combo = self._combo_block(
+            panel, "Build Type", self._level_var, BUILD_LEVELS,
+            command=lambda _value: self._on_level_change(),
         )
         level_block.grid(row=0, column=1, sticky="ew", padx=(0, 10))
-        level_combo.bind("<<ComboboxSelected>>", lambda _event: self._on_level_change())
 
         self._component_labels = {label: value for value, label in COMPONENT_OPTIONS}
         component_block, _component_combo = self._combo_block(
@@ -242,40 +247,36 @@ class RobotBuilderApp(tk.Frame):
         )
         component_block.grid(row=0, column=2, sticky="ew", padx=(0, 10))
 
-        flags_box = tk.LabelFrame(
-            panel,
-            text=" Build Flags ",
-            bg=C_SURFACE,
-            fg=C_ACCENT,
-            padx=10,
-            pady=6,
-            font=("Segoe UI", 9, "bold"),
-        )
+        flags_box = Card(panel, title="Build Flags")
+        flags_box.configure(fg_color=theme.SUNKEN_BG)
         flags_box.grid(row=0, column=3, sticky="nsew")
-        flags_box.columnconfigure(0, weight=1)
-        flags_box.columnconfigure(1, weight=1)
-        flags_box.columnconfigure(2, weight=1)
+        for col in range(3):
+            flags_box.body.columnconfigure(col, weight=1)
         for idx, (key, label) in enumerate(BUILD_FLAG_OPTIONS):
-            ttk.Checkbutton(flags_box, text=label, variable=self._flag_vars[key]).grid(
-                row=idx // 3, column=idx % 3, sticky="w", padx=(0, 12), pady=3)
+            ctk.CTkCheckBox(
+                flags_box.body, text=label, variable=self._flag_vars[key],
+                font=font("body"), fg_color=theme.ACCENT, hover_color=theme.ACCENT_HOVER,
+                checkbox_width=20, checkbox_height=20,
+            ).grid(row=idx // 3, column=idx % 3, sticky="w", padx=(0, 12), pady=3)
 
     @staticmethod
-    def _combo_block(parent, label: str, variable: tk.StringVar, values: list) -> tuple:
-        block = tk.Frame(parent, bg=C_SURFACE)
-        tk.Label(
+    def _combo_block(parent, label: str, variable: tk.StringVar, values: list,
+                     command=None) -> tuple:
+        block = ctk.CTkFrame(parent, fg_color="transparent")
+        ctk.CTkLabel(block, text=label, font=font("heading"), anchor="w").pack(
+            fill=tk.X, pady=(0, 3))
+        combo = ctk.CTkComboBox(
             block,
-            text=label,
-            font=("Segoe UI", 9, "bold"),
-            bg=C_SURFACE,
-            fg=C_TEXT,
-            anchor="w",
-        ).pack(fill=tk.X, pady=(0, 3))
-        combo = ttk.Combobox(
-            block,
-            textvariable=variable,
+            variable=variable,
             values=values,
             state="readonly",
-            width=16,
+            height=30,
+            font=font("body"),
+            dropdown_font=font("body"),
+            button_color=theme.ACCENT,
+            button_hover_color=theme.ACCENT_HOVER,
+            border_color=theme.BORDER,
+            command=command,
         )
         combo.pack(fill=tk.X)
         return block, combo
@@ -364,83 +365,84 @@ class RobotBuilderApp(tk.Frame):
                 frm.pack_forget()
 
     def _action_bar(self, parent):
-        bar = tk.Frame(parent, bg=C_BG, pady=6)
-        bar.pack(fill=tk.X)
+        bar = ctk.CTkFrame(parent, fg_color="transparent")
+        bar.pack(fill=tk.X, pady=(0, 8))
 
-        self._start_btn = tk.Button(
-            bar, text="▶  Start Build",
-            font=("Segoe UI", 10, "bold"),
-            bg=C_ACCENT, fg=C_WHITE,
-            activebackground=C_ACCENT_L, activeforeground=C_WHITE,
-            relief=tk.FLAT, cursor="hand2", padx=20, pady=6,
-            command=self._start,
+        self._start_btn = ctk.CTkButton(
+            bar, text="▶  Start Build", font=font("heading"),
+            fg_color=theme.ACCENT, hover_color=theme.ACCENT_HOVER,
+            width=150, height=36, command=self._start,
         )
         self._start_btn.pack(side=tk.LEFT, padx=(0, 8))
-        self._start_btn.bind("<Enter>", lambda e: self._start_btn.config(bg=C_ACCENT_L))
-        self._start_btn.bind("<Leave>", lambda e: self._start_btn.config(bg=C_ACCENT))
 
-        self._stop_btn = tk.Button(
-            bar, text="■  Stop Build",
-            font=("Segoe UI", 10, "bold"),
-            bg="#B71C1C", fg=C_WHITE,
-            activebackground="#7F0000", activeforeground=C_WHITE,
-            relief=tk.FLAT, cursor="hand2", padx=20, pady=6,
-            command=self._stop,
-            state=tk.DISABLED,
+        self._stop_btn = ctk.CTkButton(
+            bar, text="■  Stop Build", font=font("heading"),
+            fg_color=_STOP_RED, hover_color=_STOP_RED_HOVER,
+            width=150, height=36, command=self._stop, state="disabled",
         )
         self._stop_btn.pack(side=tk.LEFT, padx=(0, 8))
-        ttk.Button(bar, text="Clear Log", command=self._clear_log).pack(side=tk.LEFT)
+        ctk.CTkButton(
+            bar, text="Clear Log", font=font("body"),
+            fg_color=_NEUTRAL, hover_color=_NEUTRAL_HOVER, text_color=theme.BODY_FG,
+            width=100, height=36, command=self._clear_log,
+        ).pack(side=tk.LEFT)
 
     def _log_section(self, parent):
-        tk.Label(parent, text="Build Output", font=("Segoe UI", 9, "bold"),
-                 bg=C_BG, fg=C_TEXT, anchor="w").pack(fill=tk.X)
-        self._log = scrolledtext.ScrolledText(
-            parent,
-            font=("Consolas", 9),
-            bg="#1E1E2E", fg="#CDD6F4",
-            insertbackground="#CDD6F4",
-            state=tk.DISABLED,
-            wrap=tk.NONE,
-            height=20,
-        )
+        self._label(parent, "Build Output", bold=True).pack(fill=tk.X)
+        self._log = LogPane(parent, height=300)
         self._log.pack(fill=tk.BOTH, expand=True, pady=(4, 0))
-        self._log.tag_configure("info",  foreground="#89B4FA")
-        self._log.tag_configure("ok",    foreground="#A6E3A1")
-        self._log.tag_configure("error", foreground="#F38BA8")
-        self._log.tag_configure("warn",  foreground="#FAB387")
-        self._log.tag_configure("dim",   foreground="#6C7086")
 
     def _status_bar(self):
-        bar = tk.Frame(self, bg="#E8E4F3", pady=4, padx=12)
+        bar = ctk.CTkFrame(self, fg_color=theme.SUNKEN_BG, corner_radius=0, height=28)
         bar.pack(fill=tk.X, side=tk.BOTTOM)
         self._status_var  = tk.StringVar(value="Ready")
         self._elapsed_var = tk.StringVar(value="")
-        tk.Label(bar, textvariable=self._status_var,
-                 font=("Segoe UI", 8), bg="#E8E4F3", fg=C_MUTED).pack(side=tk.LEFT)
-        tk.Label(bar, textvariable=self._elapsed_var,
-                 font=("Segoe UI", 8), bg="#E8E4F3", fg=C_MUTED).pack(side=tk.RIGHT)
+        ctk.CTkLabel(bar, textvariable=self._status_var, font=font("small"),
+                     text_color=theme.MUTED_FG, anchor="w").pack(side=tk.LEFT, padx=12, pady=4)
+        ctk.CTkLabel(bar, textvariable=self._elapsed_var, font=font("small"),
+                     text_color=theme.MUTED_FG, anchor="e").pack(side=tk.RIGHT, padx=12, pady=4)
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
-    def _center(self):
-        self.update_idletasks()
-        sw, sh = self._root_window.winfo_screenwidth(), self._root_window.winfo_screenheight()
-        w, h   = self._root_window.winfo_width(), self._root_window.winfo_height()
-        self._root_window.geometry(f"+{(sw - w) // 2}+{(sh - h) // 2}")
+    def _apply_initial_geometry(self):
+        """Standalone only: open maximised with a DPI-safe fallback size.
+
+        CustomTkinter multiplies geometry() by its scaling factor, so a fixed
+        size can open partly off-screen on a scaled display.
+        """
+        root = self._root_window
+        scaling = theme.widget_scaling(root)
+        screen_w = root.winfo_screenwidth() / scaling
+        screen_h = root.winfo_screenheight() / scaling
+        width = int(min(1100, screen_w * 0.9))
+        height = int(min(820, screen_h * 0.9))
+        root.geometry("{}x{}+{}+{}".format(
+            width, height,
+            max(0, int((screen_w - width) / 2)),
+            max(0, int((screen_h - height) / 2)),
+        ))
+        root.minsize(int(min(860, screen_w * 0.6)), int(min(700, screen_h * 0.6)))
+        try:
+            root.state("zoomed")
+        except tk.TclError:
+            pass
 
     def _log_append(self, text: str, tag: str = ""):
-        self._log.configure(state=tk.NORMAL)
-        if tag:
-            self._log.insert(tk.END, text, tag)
-        else:
-            self._log.insert(tk.END, text)
-        self._log.see(tk.END)
-        self._log.configure(state=tk.DISABLED)
+        """Insert raw text (callers include their own newlines) with a colour tag."""
+        box = self._log.textbox
+        box.configure(state="normal")
+        box.insert("end", text, tag or "plain")
+        box.see("end")
+        box.configure(state="disabled")
+
+    def _log_contents(self) -> str:
+        return self._log.contents()
 
     def _clear_log(self):
-        self._log.configure(state=tk.NORMAL)
-        self._log.delete("1.0", tk.END)
-        self._log.configure(state=tk.DISABLED)
+        self._log.clear()
+
+    def on_appearance_change(self, _mode: str):
+        """Called by the launcher after a Light/Dark switch; nothing ttk here."""
 
     def _tick(self):
         if not self._build_active:
@@ -456,8 +458,8 @@ class RobotBuilderApp(tk.Frame):
         if self._elapsed_job:
             self.after_cancel(self._elapsed_job)
             self._elapsed_job = None
-        self._start_btn.config(state=tk.NORMAL)
-        self._stop_btn.config(state=tk.DISABLED)
+        self._start_btn.configure(state="normal")
+        self._stop_btn.configure(state="disabled")
         self._status_var.set("Build complete" if success else "Stopped / failed — see log")
 
     # ── Build args & script patching ──────────────────────────────────────────
@@ -518,8 +520,8 @@ class RobotBuilderApp(tk.Frame):
         self._stop_event.clear()
         self._build_active = True
         self._start_time   = time.time()
-        self._start_btn.config(state=tk.DISABLED)
-        self._stop_btn.config(state=tk.NORMAL)
+        self._start_btn.configure(state="disabled")
+        self._stop_btn.configure(state="normal")
         self._status_var.set("Connecting…")
         self._tick()
 

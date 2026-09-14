@@ -11,4 +11,6 @@ if exist "C:\Users\SG108049\AppData\Local\Programs\Python\Python314\python.exe" 
 
 echo.
 echo ERROR: Python 3 not found. Install Python 3.8+ and add it to PATH.
+echo If Python is present but the window does not open, install the UI dependencies:
+echo     python -m pip install -r requirements.txt
 pause
