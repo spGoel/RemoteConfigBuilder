@@ -118,12 +118,23 @@ class Tooltip:
             pady=int(round(8 * scale)),
         ).pack(padx=1, pady=1)
 
-        # Nudge back on screen if the tip would run off the right or bottom.
+        # Keep the tip inside the owning window. Everything here is in device
+        # pixels (winfo_root*/winfo_width), deliberately NOT winfo_screenwidth/
+        # height: on a DPI-scaled display Tk reports those in scaled units
+        # (e.g. 1536x960 for a 3840x2400 screen), and clamping device-pixel
+        # coordinates against them threw every lower tooltip to the top.
         self._window.update_idletasks()
         width = self._window.winfo_width()
         height = self._window.winfo_height()
-        x = min(x, self._window.winfo_screenwidth() - width - 8)
-        y = min(y, self._window.winfo_screenheight() - height - 8)
+        top = self.widget.winfo_toplevel()
+        left_limit = top.winfo_rootx()
+        right_limit = left_limit + top.winfo_width()
+        bottom_limit = top.winfo_rooty() + top.winfo_height()
+        if x + width > right_limit:
+            x = max(left_limit, right_limit - width - 8)
+        if y + height > bottom_limit:
+            # Flip above the widget instead of pushing it off the window.
+            y = self.widget.winfo_rooty() - height - 2
         self._window.wm_geometry("+{}+{}".format(max(x, 0), max(y, 0)))
 
     def _hide(self, _event=None) -> None:

@@ -37,7 +37,7 @@ TOOLS = [
     {
         "key": "builder",
         "title": "Robot Builder",
-        "subtitle": "Build 3L / 5L / AVL robots on a remote Linux machine",
+        "subtitle": "Build 3L / 5L / AVL robots on a remote Linux machine, or a GDK5L Windows workspace locally",
         "script": BASE_DIR / "robot_builder" / "main.py",
         "class_name": "RobotBuilderApp",
         "available": True,

@@ -1,31 +1,40 @@
 """
-Aristocrat Robot Builder — upload Linux_BuildScript.sh to a remote Linux machine,
-run it inside a named GNU Screen session, stream live output back here.
+Aristocrat Robot Builder — two tabs in one tool.
 
-UI is CustomTkinter; everything from argument collection down to the SSH
-worker is unchanged from the plain-tkinter version.
+  Linux    upload Linux_BuildScript.sh to a remote Linux machine, run it inside
+           a named GNU Screen session, stream live output back here.
+  Windows  check out GDK5L Runtime + games from SVN, generate the Visual
+           Studio solution with create_workspace_gdk5L.ps1, cmake --build and
+           --install locally (see windows_tab.py / windows_build/).
+
+`RobotBuilderApp` is the shell the launcher mounts; `LinuxBuildTab` holds the
+original remote-build UI unchanged below the widget layer.
 """
 import io
 import posixpath
-import subprocess
 import sys
-import tempfile
 import threading
 import time
 import tkinter as tk
 from tkinter import messagebox
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Tuple
 
 # The shared style layer lives at the repository root.
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
+_HERE = str(Path(__file__).resolve().parent)
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
 
 import customtkinter as ctk  # noqa: E402
 
 from common import theme, widgets  # noqa: E402
 from common.widgets import Card, LogPane, font  # noqa: E402
+
+import svn_browser  # noqa: E402
+from windows_tab import WindowsBuildTab  # noqa: E402
 
 # ── SSH credentials — always hardcoded, never prompted ────────────────────────
 SSH_USER = "mk7"
@@ -59,10 +68,6 @@ BUILD_FLAG_OPTIONS = (
 # ── Bundled script (always sits next to this file) ────────────────────────────
 _BUNDLED_SCRIPT   = Path(__file__).parent / "Linux_BuildScript.sh"
 _DEFAULT_BUILDDIR = "/home/mk7/development/robot_builds"
-_TORTOISE_PROC_CANDIDATES = (
-    Path(r"C:\Program Files\TortoiseSVN\bin\TortoiseProc.exe"),
-    Path(r"C:\Program Files (x86)\TortoiseSVN\bin\TortoiseProc.exe"),
-)
 
 # ── Default SVN URLs per build level (sourced from Linux_BuildScript.sh) ──────
 _DEFAULT_URLS: dict = {
@@ -95,8 +100,18 @@ _STOP_RED_HOVER = ("#7F0000", "#A83232")
 _NEUTRAL = ("gray70", "gray35")
 _NEUTRAL_HOVER = ("gray60", "gray45")
 
+LINUX_TAB = "Linux"
+WINDOWS_TAB = "Windows"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Shell
+# ══════════════════════════════════════════════════════════════════════════════
+
 
 class RobotBuilderApp(ctk.CTkFrame):
+    """Hosts the Linux and Windows build tabs. This is what the launcher mounts."""
+
     def __init__(self, master=None, standalone: bool = False):
         if master is None:
             master = ctk.CTk()
@@ -110,6 +125,90 @@ class RobotBuilderApp(ctk.CTkFrame):
             widgets.init_styles(self._root_window)
         if self._standalone:
             self._root_window.title("Aristocrat Robot Builder")
+            self._build_header()
+
+        self.tabs = ctk.CTkTabview(
+            self,
+            corner_radius=10,
+            fg_color="transparent",
+            segmented_button_fg_color=theme.SUNKEN_BG,
+            segmented_button_selected_color=theme.ACCENT,
+            segmented_button_selected_hover_color=theme.ACCENT_HOVER,
+            segmented_button_unselected_color=theme.SUNKEN_BG,
+            segmented_button_unselected_hover_color=theme.BORDER,
+            text_color=theme.BODY_FG,
+            anchor="w",
+        )
+        self.tabs.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 4))
+        self.tabs._segmented_button.configure(font=font("heading"))
+
+        linux_frame = self.tabs.add(LINUX_TAB)
+        windows_frame = self.tabs.add(WINDOWS_TAB)
+        self.linux = LinuxBuildTab(linux_frame, standalone=standalone)
+        self.linux.pack(fill=tk.BOTH, expand=True)
+        self.windows = WindowsBuildTab(windows_frame)
+        self.windows.pack(fill=tk.BOTH, expand=True)
+
+        if self._standalone:
+            self.pack(fill=tk.BOTH, expand=True)
+            self._apply_initial_geometry()
+
+    # -- surface used by launcher._on_close ---------------------------------
+
+    @property
+    def _build_active(self) -> bool:
+        return bool(self.linux._build_active or self.windows.running)
+
+    def _stop(self):
+        if self.linux._build_active:
+            self.linux._stop()
+        if self.windows.running:
+            self.windows.stop()
+
+    def on_appearance_change(self, mode: str):
+        self.linux.on_appearance_change(mode)
+        self.windows.on_appearance_change(mode)
+
+    # -- standalone chrome --------------------------------------------------
+
+    def _build_header(self):
+        hdr = ctk.CTkFrame(self, fg_color=theme.ACCENT, corner_radius=0)
+        hdr.pack(fill=tk.X)
+        ctk.CTkLabel(hdr, text="Robot Builder", font=font("title"),
+                     text_color="#FFFFFF").pack(pady=(14, 0))
+        ctk.CTkLabel(hdr, text="Build 3L / 5L / AVL robots on a remote Linux machine, "
+                               "or a GDK5L Windows workspace locally",
+                     font=font("small"), text_color="#C4B4F4").pack(pady=(0, 12))
+
+    def _apply_initial_geometry(self):
+        """Standalone only: open maximised with a DPI-safe fallback size."""
+        root = self._root_window
+        scaling = theme.widget_scaling(root)
+        screen_w = root.winfo_screenwidth() / scaling
+        screen_h = root.winfo_screenheight() / scaling
+        width = int(min(1300, screen_w * 0.9))
+        height = int(min(860, screen_h * 0.9))
+        root.geometry("{}x{}+{}+{}".format(
+            width, height,
+            max(0, int((screen_w - width) / 2)),
+            max(0, int((screen_h - height) / 2)),
+        ))
+        root.minsize(int(min(980, screen_w * 0.6)), int(min(700, screen_h * 0.6)))
+        try:
+            root.state("zoomed")
+        except tk.TclError:
+            pass
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Linux tab — the original remote build UI
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class LinuxBuildTab(ctk.CTkFrame):
+    def __init__(self, master, standalone: bool = False):
+        super().__init__(master, fg_color="transparent", corner_radius=0)
+        self._standalone = standalone
         self._stop_event   = threading.Event()
         self._build_active = False
         self._start_time   = 0.0
@@ -122,31 +221,23 @@ class RobotBuilderApp(ctk.CTkFrame):
         }
 
         self._build_ui()
-        if self._standalone:
-            self.pack(fill=tk.BOTH, expand=True)
-            self._apply_initial_geometry()
 
     # ── UI ────────────────────────────────────────────────────────────────────
 
     def _build_ui(self):
-        if self._standalone:
-            self._build_header()
-        body_pad = 16 if self._standalone else 12
+        body_pad = 12
         body = ctk.CTkFrame(self, fg_color="transparent")
-        body.pack(fill=tk.BOTH, expand=True, padx=body_pad, pady=(10, 4))
+        body.pack(fill=tk.BOTH, expand=True, padx=body_pad, pady=(6, 4))
+        ctk.CTkLabel(
+            body,
+            text="Remote build over SSH:  upload Linux_BuildScript.sh  →  run in a GNU Screen session  →  stream the log",
+            font=font("small"), text_color=theme.MUTED_FG, anchor="w",
+        ).pack(fill=tk.X, pady=(0, 6))
         self._machine_section(body)
         self._config_section(body)
         self._action_bar(body)
         self._log_section(body)
         self._status_bar()
-
-    def _build_header(self):
-        hdr = ctk.CTkFrame(self, fg_color=theme.ACCENT, corner_radius=0)
-        hdr.pack(fill=tk.X)
-        ctk.CTkLabel(hdr, text="Robot Builder", font=font("title"),
-                     text_color="#FFFFFF").pack(pady=(14, 0))
-        ctk.CTkLabel(hdr, text="Build 3L / 5L / AVL robots on a remote Linux machine",
-                     font=font("small"), text_color="#C4B4F4").pack(pady=(0, 12))
 
     def _card(self, parent, title: str) -> ctk.CTkFrame:
         card = Card(parent, title=title)
@@ -282,79 +373,7 @@ class RobotBuilderApp(ctk.CTkFrame):
         return block, combo
 
     def _browse_svn_url(self, level: str, key: str, label: str):
-        tortoise_proc = self._find_tortoise_proc()
-        url_var = self._url_vars[level][key]
-        url = url_var.get().strip()
-
-        if tortoise_proc is None:
-            messagebox.showerror(
-                "TortoiseSVN Not Found",
-                "TortoiseSVN Repository Browser could not be opened because "
-                "TortoiseProc.exe was not found.",
-                parent=self,
-            )
-            return
-
-        if not url:
-            messagebox.showwarning(
-                "Missing SVN URL",
-                f"Enter a {label} URL before opening the Repository Browser.",
-                parent=self,
-            )
-            return
-
-        try:
-            output_path = self._new_repo_browser_output_path()
-            proc = subprocess.Popen([
-                str(tortoise_proc),
-                "/command:repobrowser",
-                f"/path:{url}",
-                f"/outfile:{output_path}",
-            ])
-            threading.Thread(
-                target=self._repo_browser_result_worker,
-                args=(proc, output_path, url_var),
-                daemon=True,
-            ).start()
-        except Exception as exc:
-            messagebox.showerror(
-                "Repository Browser",
-                f"Failed to open TortoiseSVN Repository Browser:\n{exc}",
-                parent=self,
-            )
-
-    @staticmethod
-    def _find_tortoise_proc() -> Optional[Path]:
-        for candidate in _TORTOISE_PROC_CANDIDATES:
-            if candidate.exists():
-                return candidate
-        return None
-
-    @staticmethod
-    def _new_repo_browser_output_path() -> Path:
-        handle = tempfile.NamedTemporaryFile(
-            prefix="robot_builder_repo_",
-            suffix=".txt",
-            delete=False,
-        )
-        path = Path(handle.name)
-        handle.close()
-        return path
-
-    def _repo_browser_result_worker(self, proc, output_path: Path, url_var: tk.StringVar):
-        try:
-            proc.wait()
-            if not output_path.exists():
-                return
-            lines = output_path.read_text(encoding="utf-8", errors="replace").splitlines()
-            selected_url = lines[0].strip() if lines else ""
-            if selected_url:
-                self.after(0, url_var.set, selected_url)
-        finally:
-            try:
-                output_path.unlink(missing_ok=True)
-            except Exception:
-                pass
+        svn_browser.browse_svn_url(self, self._url_vars[level][key], label)
 
     def _on_level_change(self):
         active = self._level_var.get()
@@ -404,29 +423,6 @@ class RobotBuilderApp(ctk.CTkFrame):
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
-    def _apply_initial_geometry(self):
-        """Standalone only: open maximised with a DPI-safe fallback size.
-
-        CustomTkinter multiplies geometry() by its scaling factor, so a fixed
-        size can open partly off-screen on a scaled display.
-        """
-        root = self._root_window
-        scaling = theme.widget_scaling(root)
-        screen_w = root.winfo_screenwidth() / scaling
-        screen_h = root.winfo_screenheight() / scaling
-        width = int(min(1100, screen_w * 0.9))
-        height = int(min(820, screen_h * 0.9))
-        root.geometry("{}x{}+{}+{}".format(
-            width, height,
-            max(0, int((screen_w - width) / 2)),
-            max(0, int((screen_h - height) / 2)),
-        ))
-        root.minsize(int(min(860, screen_w * 0.6)), int(min(700, screen_h * 0.6)))
-        try:
-            root.state("zoomed")
-        except tk.TclError:
-            pass
-
     def _log_append(self, text: str, tag: str = ""):
         """Insert raw text (callers include their own newlines) with a colour tag."""
         box = self._log.textbox
@@ -442,7 +438,7 @@ class RobotBuilderApp(ctk.CTkFrame):
         self._log.clear()
 
     def on_appearance_change(self, _mode: str):
-        """Called by the launcher after a Light/Dark switch; nothing ttk here."""
+        """Nothing ttk in this tab; kept for the shell's pass-through."""
 
     def _tick(self):
         if not self._build_active:

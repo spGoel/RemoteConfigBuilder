@@ -40,12 +40,15 @@ class RobotBuilderTabTests(unittest.TestCase):
         destroy_root(cls.root)
 
     def setUp(self):
-        self.app = RobotBuilderApp(self.root, standalone=False)
-        self.app.pack(fill="both", expand=True)
-        pump(self.app)
+        # RobotBuilderApp is now a shell with Linux + Windows tabs; these tests
+        # exercise the Linux tab, which kept every method of the old class.
+        self.shell = RobotBuilderApp(self.root, standalone=False)
+        self.shell.pack(fill="both", expand=True)
+        self.app = self.shell.linux
+        pump(self.shell)
 
     def tearDown(self):
-        self.app.destroy()
+        self.shell.destroy()
 
     # -- argument collection -------------------------------------------------
 
@@ -146,7 +149,7 @@ class RobotBuilderTabTests(unittest.TestCase):
         self.assertFalse(self.app._build_active)
 
     def test_line_tags(self):
-        tag = RobotBuilderApp._line_tag
+        tag = robot_builder.LinuxBuildTab._line_tag
         self.assertEqual(tag("=== BUILD COMPLETE ==="), "ok")
         self.assertEqual(tag("make: *** Error: failed"), "error")
         self.assertEqual(tag("warning: unused"), "warn")
