@@ -8,14 +8,19 @@ from tkinter import filedialog, ttk
 
 import customtkinter as ctk
 
-from common import theme
+from common import perf, theme
 
 # Populated by init_styles() once a CTk root exists.
 FONTS = {}
 
 
 def init_styles(root: ctk.CTk) -> None:
-    """Set up fonts and the ttk theming for the app."""
+    """Set up fonts and the ttk theming for the app.
+
+    Also installs the CustomTkinter redraw workarounds (see common/perf.py)
+    so every entry point, launcher or standalone, gets them.
+    """
+    perf.install()
     FONTS.clear()
     FONTS.update(theme.fonts())
     theme.style_treeview(root)

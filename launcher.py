@@ -20,7 +20,8 @@ except ImportError:  # pragma: no cover - reported by launch.bat
     print("customtkinter is not installed. Run:  python -m pip install -r requirements.txt")
     raise
 
-from common import theme, widgets
+from common import perf, theme, widgets, window
+from common.perf import StackedTabview
 from common.widgets import font
 
 # Palette kept for tools that still use the plain-tk look.
@@ -117,27 +118,11 @@ class LauncherApp(ctk.CTk):
     # ------------------------------------------------------------------
 
     def _apply_initial_geometry(self):
-        """Open maximised, sized from the real screen.
-
-        CustomTkinter multiplies geometry() by its DPI scaling factor, so the
-        old fixed 1320x820 would open far larger than intended on a scaled
-        display. Derive the fallback from the screen, then maximise.
-        """
-        scaling = theme.widget_scaling(self)
-        screen_w = self.winfo_screenwidth() / scaling
-        screen_h = self.winfo_screenheight() / scaling
-        width = int(min(1320, screen_w * 0.92))
-        height = int(min(820, screen_h * 0.90))
-        self.geometry("{}x{}+{}+{}".format(
-            width, height,
-            max(0, int((screen_w - width) / 2)),
-            max(0, int((screen_h - height) / 2)),
-        ))
-        self.minsize(int(min(980, screen_w * 0.6)), int(min(640, screen_h * 0.6)))
-        try:
-            self.state("zoomed")
-        except tk.TclError:
-            pass
+        """Open maximised on the monitor under the pointer, at its real
+        resolution. See common/window.py for why this needs Win32 calls
+        rather than Tk's own (DPI-virtualized, primary-monitor-only) screen
+        metrics."""
+        window.open_maximised(self)
 
     # ------------------------------------------------------------------
     # Layout
@@ -182,7 +167,8 @@ class LauncherApp(ctk.CTk):
         shell.columnconfigure(0, weight=1)
         shell.rowconfigure(0, weight=1)
 
-        self.tabview = ctk.CTkTabview(
+        # StackedTabview raises tabs instead of unmapping/remapping them; see common/perf.py.
+        self.tabview = StackedTabview(
             shell,
             corner_radius=10,
             fg_color=theme.CARD_BG,
@@ -258,7 +244,9 @@ class LauncherApp(ctk.CTk):
     # ------------------------------------------------------------------
 
     def _set_appearance(self, mode: str):
-        ctk.set_appearance_mode(mode)
+        # perf.set_appearance_mode unmaps hidden tabs first so Tk does not
+        # repaint them; they remap on their next selection.
+        perf.set_appearance_mode(mode)
         # ttk has no notion of appearance mode, so themed trees need repainting.
         theme.style_treeview(self)
         for app in self._tool_apps.values():

@@ -27,7 +27,7 @@ if str(_TOOL_DIR) not in sys.path:
 
 import customtkinter as ctk  # noqa: E402
 
-from common import theme, widgets  # noqa: E402
+from common import theme, widgets, window  # noqa: E402
 from common.widgets import Card, font  # noqa: E402
 
 import snapshot_manager  # noqa: E402
@@ -372,27 +372,9 @@ class App(ctk.CTkFrame):
                 hook(mode)
 
     def _apply_initial_geometry(self):
-        """Standalone only: open maximised with a DPI-safe fallback size.
-
-        CustomTkinter multiplies geometry() by its scaling factor, so a fixed
-        size can open partly off-screen on a scaled display.
-        """
-        root = self._root_window
-        scaling = theme.widget_scaling(root)
-        screen_w = root.winfo_screenwidth() / scaling
-        screen_h = root.winfo_screenheight() / scaling
-        width = int(min(1300, screen_w * 0.9))
-        height = int(min(760, screen_h * 0.9))
-        root.geometry("{}x{}+{}+{}".format(
-            width, height,
-            max(0, int((screen_w - width) / 2)),
-            max(0, int((screen_h - height) / 2)),
-        ))
-        root.minsize(int(min(900, screen_w * 0.6)), int(min(520, screen_h * 0.6)))
-        try:
-            root.state("zoomed")
-        except tk.TclError:
-            pass
+        """Standalone only: open maximised on the monitor under the pointer,
+        at its real resolution (see common/window.py)."""
+        window.open_maximised(self._root_window)
 
     # ═══ Key bindings ══════════════════════════════════════════
 

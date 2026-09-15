@@ -30,7 +30,8 @@ if _HERE not in sys.path:
 
 import customtkinter as ctk  # noqa: E402
 
-from common import theme, widgets  # noqa: E402
+from common import theme, widgets, window  # noqa: E402
+from common.perf import StackedTabview  # noqa: E402
 from common.widgets import Card, LogPane, font  # noqa: E402
 
 import svn_browser  # noqa: E402
@@ -127,7 +128,7 @@ class RobotBuilderApp(ctk.CTkFrame):
             self._root_window.title("Aristocrat Robot Builder")
             self._build_header()
 
-        self.tabs = ctk.CTkTabview(
+        self.tabs = StackedTabview(
             self,
             corner_radius=10,
             fg_color="transparent",
@@ -181,23 +182,9 @@ class RobotBuilderApp(ctk.CTkFrame):
                      font=font("small"), text_color="#C4B4F4").pack(pady=(0, 12))
 
     def _apply_initial_geometry(self):
-        """Standalone only: open maximised with a DPI-safe fallback size."""
-        root = self._root_window
-        scaling = theme.widget_scaling(root)
-        screen_w = root.winfo_screenwidth() / scaling
-        screen_h = root.winfo_screenheight() / scaling
-        width = int(min(1300, screen_w * 0.9))
-        height = int(min(860, screen_h * 0.9))
-        root.geometry("{}x{}+{}+{}".format(
-            width, height,
-            max(0, int((screen_w - width) / 2)),
-            max(0, int((screen_h - height) / 2)),
-        ))
-        root.minsize(int(min(980, screen_w * 0.6)), int(min(700, screen_h * 0.6)))
-        try:
-            root.state("zoomed")
-        except tk.TclError:
-            pass
+        """Standalone only: open maximised on the monitor under the pointer,
+        at its real resolution (see common/window.py)."""
+        window.open_maximised(self._root_window)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
