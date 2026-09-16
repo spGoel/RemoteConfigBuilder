@@ -4,10 +4,15 @@ Everything the window edits lives in a `Settings` instance; everything the
 pipeline needs is a derived property on it, so the folder layout is decided
 in exactly one place:
 
-    <workspace>\\Runtime                      SVN checkout of the GDK runtime
-    <workspace>\\Games\\<name>                one folder per game URL
-    <workspace>\\Build_<vs>[_modular]         CMake build tree (the .sln lives here)
-    <workspace>\\Binaries_<vs>[_modular]      install prefix
+    <workspace>\\GDK5L\\Runtime                     SVN checkout of the GDK runtime
+    <workspace>\\GDK5L\\Build_<vs>[_modular]        CMake build tree (the .sln lives here)
+    <workspace>\\GDK5L\\Binaries_<vs>[_modular]     install prefix
+    <workspace>\\SampleGames\\<name>                one folder per game URL
+
+Runtime, the build tree and the install prefix all sit inside a `GDK5L`
+folder, and games sit in a sibling `SampleGames` folder, matching the layout
+of the official 5L Windows build process (which the user provided; see
+Settings.gdk5l_dir).
 """
 
 import dataclasses
@@ -50,19 +55,20 @@ FOLDER_NAME_RE = re.compile(r"^[A-Za-z0-9_.\-]+$")
 # Short help for every field, shown by the (i) markers in the UI.
 FIELD_HELP = {
     "workspace": (
-        "Root folder for everything this tool creates or updates: the Runtime "
-        "checkout, the Games folder, and the Build_/Binaries_ output folders. "
-        "Pick an empty folder for a fresh setup, or an existing one to reuse it."
+        "Root folder for everything this tool creates or updates: a GDK5L folder "
+        "(Runtime checkout plus the Build_/Binaries_ output folders) and a "
+        "sibling SampleGames folder. Pick an empty folder for a fresh setup, or "
+        "an existing one to reuse it."
     ),
     "runtime_url": (
-        "SVN URL of the GDK5L Runtime. It is checked out into <workspace>\\Runtime, "
+        "SVN URL of the GDK5L Runtime. It is checked out into <workspace>\\GDK5L\\Runtime, "
         "or updated if that folder is already a working copy of this URL. The "
         "workspace-creation script is taken from inside this checkout."
     ),
     "games": (
         "One SVN URL per game to include in the solution. Each is checked out into "
-        "<workspace>\\Games\\<folder>; the folder name is derived from the URL but "
-        "can be edited, which matters for repositories that end in 'sandbox' or "
+        "<workspace>\\SampleGames\\<folder>; the folder name is derived from the URL "
+        "but can be edited, which matters for repositories that end in 'sandbox' or "
         "'source'. Every folder is passed to the script via -GameDirectories."
     ),
     "skip_svn": (
@@ -144,12 +150,21 @@ class Settings:
     # ------------------------------------------------------------------
 
     @property
+    def gdk5l_dir(self) -> str:
+        """Root of the official build layout's GDK5L folder: Runtime and the
+        Build_/Binaries_ output folders all live inside it."""
+        return os.path.join(self.workspace, "GDK5L")
+
+    @property
     def runtime_dir(self) -> str:
-        return os.path.join(self.workspace, "Runtime")
+        return os.path.join(self.gdk5l_dir, "Runtime")
 
     @property
     def games_dir(self) -> str:
-        return os.path.join(self.workspace, "Games")
+        # A sibling of GDK5L, matching the official layout, and matching the
+        # vendor script's own default (GamesRootDirectory = WorkspaceBase\..\SampleGames,
+        # where WorkspaceBase is the GDK5L folder).
+        return os.path.join(self.workspace, "SampleGames")
 
     def game_dir(self, game: GameSource) -> str:
         return os.path.join(self.games_dir, game.folder)
@@ -160,11 +175,11 @@ class Settings:
 
     @property
     def build_dir(self) -> str:
-        return os.path.join(self.workspace, "Build_" + self._suffix)
+        return os.path.join(self.gdk5l_dir, "Build_" + self._suffix)
 
     @property
     def binaries_dir(self) -> str:
-        return os.path.join(self.workspace, "Binaries_" + self._suffix)
+        return os.path.join(self.gdk5l_dir, "Binaries_" + self._suffix)
 
     @property
     def generator(self) -> str:

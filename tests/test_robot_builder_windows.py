@@ -86,13 +86,13 @@ class FolderNameTests(unittest.TestCase):
 class SettingsPathTests(unittest.TestCase):
     def test_derived_folders_follow_vs_and_layout(self):
         s = make_settings(vs="2022", layout="Aggregate")
-        self.assertEqual(s.runtime_dir, r"C:\ws\Runtime")
-        self.assertEqual(s.games_dir, r"C:\ws\Games")
-        self.assertEqual(s.build_dir, r"C:\ws\Build_2022")
-        self.assertEqual(s.binaries_dir, r"C:\ws\Binaries_2022")
+        self.assertEqual(s.runtime_dir, r"C:\ws\GDK5L\Runtime")
+        self.assertEqual(s.games_dir, r"C:\ws\SampleGames")
+        self.assertEqual(s.build_dir, r"C:\ws\GDK5L\Build_2022")
+        self.assertEqual(s.binaries_dir, r"C:\ws\GDK5L\Binaries_2022")
         s = make_settings(vs="2019", layout="Modular")
-        self.assertEqual(s.build_dir, r"C:\ws\Build_2019_modular")
-        self.assertEqual(s.binaries_dir, r"C:\ws\Binaries_2019_modular")
+        self.assertEqual(s.build_dir, r"C:\ws\GDK5L\Build_2019_modular")
+        self.assertEqual(s.binaries_dir, r"C:\ws\GDK5L\Binaries_2019_modular")
 
     def test_generator_string(self):
         self.assertEqual(make_settings(vs="2019").generator, "Visual Studio 16 2019")
@@ -101,12 +101,12 @@ class SettingsPathTests(unittest.TestCase):
     def test_script_path_under_runtime(self):
         self.assertEqual(
             make_settings().script_path,
-            r"C:\ws\Runtime\etc\scripts\build\create_workspace_gdk5L.ps1",
+            r"C:\ws\GDK5L\Runtime\etc\scripts\build\create_workspace_gdk5L.ps1",
         )
 
     def test_game_dir(self):
         s = make_settings()
-        self.assertEqual(s.game_dir(s.games[0]), r"C:\ws\Games\BuffaloStrike")
+        self.assertEqual(s.game_dir(s.games[0]), r"C:\ws\SampleGames\BuffaloStrike")
 
     def test_round_trip_json(self):
         s = make_settings(games=[GameSource("https://a/b/G1", "G1"), GameSource("https://a/b/G2", "Two")])
@@ -164,16 +164,16 @@ class SvnPlanningTests(unittest.TestCase):
         s = make_settings()
         stages = pipeline.svn_stages(s, FakeFS())
         self.assertEqual(len(stages), 2)
-        self.assertEqual(stages[0].argv, ["svn", "checkout", s.runtime_url, r"C:\ws\Runtime"])
-        self.assertEqual(stages[1].argv, ["svn", "checkout", s.games[0].url, r"C:\ws\Games\BuffaloStrike"])
+        self.assertEqual(stages[0].argv, ["svn", "checkout", s.runtime_url, r"C:\ws\GDK5L\Runtime"])
+        self.assertEqual(stages[1].argv, ["svn", "checkout", s.games[0].url, r"C:\ws\SampleGames\BuffaloStrike"])
         self.assertIsNone(stages[0].expected_url)
 
     def test_update_when_working_copy_exists(self):
         s = make_settings()
-        stages = pipeline.svn_stages(s, FakeFS([r"C:\ws\Runtime\.svn"]))
-        self.assertEqual(stages[0].argv, ["svn", "update", r"C:\ws\Runtime"])
+        stages = pipeline.svn_stages(s, FakeFS([r"C:\ws\GDK5L\Runtime\.svn"]))
+        self.assertEqual(stages[0].argv, ["svn", "update", r"C:\ws\GDK5L\Runtime"])
         self.assertEqual(stages[0].expected_url, s.runtime_url)
-        self.assertEqual(stages[0].check_dir, r"C:\ws\Runtime")
+        self.assertEqual(stages[0].check_dir, r"C:\ws\GDK5L\Runtime")
 
     def test_skip_svn_yields_nothing(self):
         self.assertEqual(pipeline.svn_stages(make_settings(skip_svn=True), FakeFS()), [])
@@ -188,18 +188,18 @@ class ConfigurePlanningTests(unittest.TestCase):
         stage = pipeline.configure_stage(make_settings())
         self.assertEqual(stage.argv[:5], ["pwsh", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command"])
         command = stage.argv[5]
-        self.assertIn("& 'C:\\ws\\Runtime\\etc\\scripts\\build\\create_workspace_gdk5L.ps1'", command)
+        self.assertIn("& 'C:\\ws\\GDK5L\\Runtime\\etc\\scripts\\build\\create_workspace_gdk5L.ps1'", command)
         self.assertIn("-Generator 'Visual Studio 17 2022'", command)
-        self.assertIn("-BuildOutputPath 'C:\\ws\\Build_2022'", command)
-        self.assertIn("-BinariesOutputPath 'C:\\ws\\Binaries_2022'", command)
+        self.assertIn("-BuildOutputPath 'C:\\ws\\GDK5L\\Build_2022'", command)
+        self.assertIn("-BinariesOutputPath 'C:\\ws\\GDK5L\\Binaries_2022'", command)
         self.assertIn("-NoDefaultGamesRootDirectory", command)
-        self.assertIn("-GameDirectories @('C:\\ws\\Games\\BuffaloStrike')", command)
+        self.assertIn("-GameDirectories @('C:\\ws\\SampleGames\\BuffaloStrike')", command)
         self.assertIn("-SuppressDeletionOfBuildOutputPath", command)
         self.assertIn("-SuppressDeletionOfBinariesOutputPath", command)
         self.assertNotIn("-UseModularBuild", command)
         self.assertNotIn("-BuildSolution", command)
         self.assertTrue(command.rstrip().endswith("exit $LASTEXITCODE"))
-        self.assertEqual(stage.cwd, r"C:\ws\Runtime\etc\scripts\build")
+        self.assertEqual(stage.cwd, r"C:\ws\GDK5L\Runtime\etc\scripts\build")
 
     def test_force_regenerate_lets_script_delete(self):
         command = pipeline.configure_stage(make_settings(force_regenerate=True)).argv[5]
@@ -209,7 +209,7 @@ class ConfigurePlanningTests(unittest.TestCase):
         command = pipeline.configure_stage(make_settings(vs="2019", layout="Modular")).argv[5]
         self.assertIn("-Generator 'Visual Studio 16 2019'", command)
         self.assertIn("-UseModularBuild", command)
-        self.assertIn("-BuildOutputPath 'C:\\ws\\Build_2019_modular'", command)
+        self.assertIn("-BuildOutputPath 'C:\\ws\\GDK5L\\Build_2019_modular'", command)
 
     def test_no_games_omits_game_directories(self):
         command = pipeline.configure_stage(make_settings(games=[])).argv[5]
@@ -218,7 +218,7 @@ class ConfigurePlanningTests(unittest.TestCase):
 
     def test_multiple_games_joined(self):
         s = make_settings(games=[GameSource("https://a/G1", "G1"), GameSource("https://a/G2", "G2")])
-        self.assertIn("-GameDirectories @('C:\\ws\\Games\\G1','C:\\ws\\Games\\G2')",
+        self.assertIn("-GameDirectories @('C:\\ws\\SampleGames\\G1','C:\\ws\\SampleGames\\G2')",
                       pipeline.configure_stage(s).argv[5])
 
     def test_extra_arguments_appended_verbatim(self):
@@ -230,13 +230,13 @@ class BuildInstallPlanningTests(unittest.TestCase):
     def test_build_mirrors_script_with_parallel_msbuild(self):
         self.assertEqual(
             pipeline.build_stage(make_settings(config="Release")).argv,
-            ["cmake", "--build", r"C:\ws\Build_2022", "--config", "Release", "--", "-r", "-m"],
+            ["cmake", "--build", r"C:\ws\GDK5L\Build_2022", "--config", "Release", "--", "-r", "-m"],
         )
 
     def test_install(self):
         self.assertEqual(
             pipeline.install_stage(make_settings(config="Retail")).argv,
-            ["cmake", "--install", r"C:\ws\Build_2022", "--config", "Retail"],
+            ["cmake", "--install", r"C:\ws\GDK5L\Build_2022", "--config", "Retail"],
         )
 
 
@@ -249,21 +249,22 @@ class PlanTests(unittest.TestCase):
                          ["svn", "svn", "configure", "build", "install"])
 
     def test_existing_cache_skips_configure(self):
-        fs = FakeFS([r"C:\ws\Runtime\.svn", r"C:\ws\Games\BuffaloStrike\.svn", r"C:\ws\Build_2022\CMakeCache.txt"])
+        fs = FakeFS([r"C:\ws\GDK5L\Runtime\.svn", r"C:\ws\SampleGames\BuffaloStrike\.svn",
+                    r"C:\ws\GDK5L\Build_2022\CMakeCache.txt"])
         self.assertEqual(self.kinds(pipeline.plan(make_settings(action="Build"), fs)), ["svn", "svn", "build"])
 
     def test_force_regenerate_reconfigures_despite_cache(self):
-        fs = FakeFS([r"C:\ws\Build_2022\CMakeCache.txt"])
+        fs = FakeFS([r"C:\ws\GDK5L\Build_2022\CMakeCache.txt"])
         stages = pipeline.plan(make_settings(action="Build", force_regenerate=True, skip_svn=True), fs)
         self.assertEqual(self.kinds(stages), ["configure", "build"])
 
     def test_configure_only_always_configures(self):
-        fs = FakeFS([r"C:\ws\Build_2022\CMakeCache.txt"])
+        fs = FakeFS([r"C:\ws\GDK5L\Build_2022\CMakeCache.txt"])
         self.assertEqual(self.kinds(pipeline.plan(make_settings(action="Configure only", skip_svn=True), fs)),
                          ["configure"])
 
     def test_install_only(self):
-        fs = FakeFS([r"C:\ws\Build_2022\CMakeCache.txt"])
+        fs = FakeFS([r"C:\ws\GDK5L\Build_2022\CMakeCache.txt"])
         self.assertEqual(self.kinds(pipeline.plan(make_settings(action="Install only", skip_svn=True), fs)),
                          ["install"])
 
@@ -272,7 +273,7 @@ class PlanTests(unittest.TestCase):
             pipeline.plan(make_settings(action="Install only", skip_svn=True), FakeFS())
 
     def test_cache_from_other_vs_does_not_count(self):
-        fs = FakeFS([r"C:\ws\Build_2019\CMakeCache.txt"])
+        fs = FakeFS([r"C:\ws\GDK5L\Build_2019\CMakeCache.txt"])
         self.assertEqual(self.kinds(pipeline.plan(make_settings(action="Build", skip_svn=True), fs)),
                          ["configure", "build"])
 
@@ -283,7 +284,7 @@ class PlanTests(unittest.TestCase):
 
     def test_preview_quotes_paths_with_spaces(self):
         text = pipeline.preview(pipeline.plan(make_settings(workspace=r"C:\my ws", skip_svn=True), FakeFS()))
-        self.assertIn('"C:\\my ws\\Build_2022"', text)
+        self.assertIn('"C:\\my ws\\GDK5L\\Build_2022"', text)
 
 
 # --------------------------------------------------------------------------
@@ -335,8 +336,9 @@ class WindowsTabUITests(unittest.TestCase):
 
     def test_plan_skips_configure_when_cache_exists(self):
         ws = os.path.join(self.tmp.name, "ws")
-        os.makedirs(os.path.join(ws, "Build_2022"), exist_ok=True)
-        with open(os.path.join(ws, "Build_2022", "CMakeCache.txt"), "w") as handle:
+        build_dir = os.path.join(ws, "GDK5L", "Build_2022")
+        os.makedirs(build_dir, exist_ok=True)
+        with open(os.path.join(build_dir, "CMakeCache.txt"), "w") as handle:
             handle.write("# cache\n")
         self.win.workspace_var.set(ws)
         self.win.skip_svn_var.set(True)
@@ -345,7 +347,7 @@ class WindowsTabUITests(unittest.TestCase):
         self.assertEqual([s.kind for s in self.win._stages], ["build"])
         self.assertIn("cmake --build", self.win.preview.get("1.0", "end-1c"))
         self.assertEqual(self.win.run_button.cget("state"), "normal")
-        self.assertEqual(self.win.path_labels["build"].cget("text"), os.path.join(ws, "Build_2022"))
+        self.assertEqual(self.win.path_labels["build"].cget("text"), build_dir)
 
     def test_switching_vs_adds_configure_when_no_cache(self):
         ws = os.path.join(self.tmp.name, "ws2")
