@@ -101,7 +101,9 @@ class MemoryProfilingTabTests(unittest.TestCase):
         pump(self.app)
         self.assertEqual(self.app._current_values["Free-Memory"], 3900)
         self.assertEqual(self.app._current_values["Games-Played"], 14)
-        self.assertEqual(self.app._value_labels["Free-Memory"].cget("text"), "3,900")
+        # Free-Memory mirrors /proc/meminfo's KB convention, so the legend
+        # shows it converted to MB rather than the raw KB figure.
+        self.assertEqual(self.app._value_labels["Free-Memory"].cget("text"), "3.8 MB")
         self.assertEqual(self.app._value_labels["CMR"].cget("text"), "42.300")
         self.assertIn("9 new values saved", self.app._status_var.get())
         earliest, latest = self.app._history.time_bounds(self.csv_path)

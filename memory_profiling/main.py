@@ -22,7 +22,7 @@ import tempfile
 import threading
 import time
 import tkinter as tk
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from tkinter import filedialog
 from typing import Dict, Iterable, List, Optional, Tuple
@@ -69,6 +69,16 @@ METER_COLORS = {
     ])
 }
 
+# Meters that read far more naturally in MB than in Robot's native units.
+# The Video-* meters come straight from the video driver in bytes; the
+# system memory/cache meters mirror Linux /proc/meminfo, which reports in KB.
+# Everything else (percentages, counters, currency) is left in its own unit.
+_BYTES_TO_MB_METERS = {"Video-Used-Memory", "Video-Free-Memory", "Video-Total-Memory"}
+_KB_TO_MB_METERS = {
+    "Used-Memory", "Free-Memory", "Total-Memory",
+    "File-Buffer-Cache", "Page-Cache", "Real-Free-Memory",
+}
+
 RANGE_OPTIONS = {
     "5 minutes": 5 * 60,
     "30 minutes": 30 * 60,
@@ -104,24 +114,37 @@ def _load_settings() -> dict:
 
 
 def _parse_robot_time(value: str) -> Optional[float]:
-    """Parse the timestamp formats emitted by Boost ptime and common CSVs."""
+    """Parse the timestamp formats emitted by Boost ptime and common CSVs.
+
+    Robot logs these in UTC with no timezone marker. A naive datetime's
+    ``.timestamp()`` assumes the *host's* local timezone, so on a profiler
+    machine not already set to UTC (e.g. Windows in IST) every parsed sample
+    lands hours away from ``time.time()`` and silently drops out of the
+    live/history chart window. Attach UTC explicitly whenever the parsed
+    value carries no tzinfo of its own.
+    """
     value = value.strip()
     if not value:
         return None
+    parsed = None
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
-        pass
-    for fmt in (
-        "%Y-%b-%d %H:%M:%S.%f",
-        "%Y-%b-%d %H:%M:%S",
-        "%Y/%m/%d %H:%M:%S",
-    ):
-        try:
-            return datetime.strptime(value, fmt).timestamp()
-        except ValueError:
-            continue
-    return None
+        for fmt in (
+            "%Y-%b-%d %H:%M:%S.%f",
+            "%Y-%b-%d %H:%M:%S",
+            "%Y/%m/%d %H:%M:%S",
+        ):
+            try:
+                parsed = datetime.strptime(value, fmt)
+                break
+            except ValueError:
+                continue
+    if parsed is None:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
 
 
 def _remote_cache_path(ip: str, remote_path: str) -> Path:
@@ -133,17 +156,42 @@ def _remote_cache_path(ip: str, remote_path: str) -> Path:
     return cache_dir / f"meters_{digest}.csv"
 
 
+# Robot writes two independent meter streams below a build root: the full
+# dump (all meters, written on state changes) and a partial dump of just the
+# game/financial counters (written every ~4s). Picking only whichever has the
+# newest mtime — as a single combined "find | sort | head -1" does — starves
+# the slower file forever, since the 4-second stream almost always wins that
+# race. That left memory/CPU meters stuck showing no data even though Robot
+# was actively logging them. Both are now located and downloaded independently.
+_REMOTE_METER_FILENAMES = ("meters.csv", "meters4sec.csv")
+
+
+def _find_newest_remote_file(client, root: str, filename: str) -> Optional[str]:
+    quoted_pattern = shlex.quote(f"*/common/build/robotlogs/{filename}")
+    quoted_root = shlex.quote(root)
+    command = (
+        f"find {quoted_root} -type f -path {quoted_pattern} "
+        r"-printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1"
+    )
+    _, stdout, stderr = client.exec_command(command)
+    stdout.channel.recv_exit_status()
+    result = stdout.read().decode(errors="replace").strip()
+    return result.split(" ", 1)[1] if result else None
+
+
 def download_remote_meter_csv(
     ip: str,
     remote_path_or_root: str,
-    previous_signature: Optional[Tuple[int, int]] = None,
-) -> Tuple[Path, Tuple[int, int], str, bool]:
-    """Download an EGM meter CSV through SSH.
+    previous_signatures: Optional[Dict[str, Tuple[int, int]]] = None,
+) -> List[Tuple[Path, Tuple[int, int], str, bool]]:
+    """Download Robot's meter CSV(s) through SSH.
 
-    ``remote_path_or_root`` may be the exact CSV filename or a build/search
-    directory. For a directory, the newest ``*/common/build/robotlogs/*.csv``
-    meter file is selected. Returns local path, remote signature, resolved
-    remote path, and whether the remote file was unchanged.
+    ``remote_path_or_root`` may be the exact CSV filename, or a build/search
+    directory in which case every file in ``_REMOTE_METER_FILENAMES`` that
+    exists below it is downloaded. ``previous_signatures`` maps a resolved
+    remote path to the signature last seen for it. Returns one
+    (local path, remote signature, resolved remote path, unchanged) tuple per
+    file found.
     """
     try:
         import paramiko
@@ -158,44 +206,46 @@ def download_remote_meter_csv(
         raise ValueError("Enter the EGM IP address")
     if not remote_path_or_root:
         raise ValueError("Enter the remote meter CSV path or build directory")
+    previous_signatures = previous_signatures or {}
 
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     client.connect(ip, username="mk7", password="mk7", timeout=15)
     try:
         if remote_path_or_root.lower().endswith(".csv"):
-            remote_path = remote_path_or_root
+            remote_paths = [remote_path_or_root]
         else:
-            quoted_root = shlex.quote(remote_path_or_root)
-            command = (
-                f"find {quoted_root} -type f "
-                r"\( -path '*/common/build/robotlogs/meters.csv' "
-                r"-o -path '*/common/build/robotlogs/meters4sec.csv' \) "
-                r"-printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1"
-            )
-            _, stdout, stderr = client.exec_command(command)
-            exit_code = stdout.channel.recv_exit_status()
-            result = stdout.read().decode(errors="replace").strip()
-            if exit_code != 0 or not result:
-                error = stderr.read().decode(errors="replace").strip()
+            remote_paths = [
+                path for path in (
+                    _find_newest_remote_file(client, remote_path_or_root, name)
+                    for name in _REMOTE_METER_FILENAMES
+                )
+                if path
+            ]
+            if not remote_paths:
                 raise FileNotFoundError(
                     f"No Robot meter CSV found below {remote_path_or_root}"
-                    + (f": {error}" if error else "")
                 )
-            remote_path = result.split(" ", 1)[1]
 
         sftp = client.open_sftp()
         try:
-            attributes = sftp.stat(remote_path)
-            signature = (int(attributes.st_mtime), int(attributes.st_size))
-            local_path = _remote_cache_path(ip, remote_path)
-            if previous_signature == signature and local_path.exists():
-                return local_path, signature, remote_path, True
+            results = []
+            for remote_path in remote_paths:
+                attributes = sftp.stat(remote_path)
+                signature = (int(attributes.st_mtime), int(attributes.st_size))
+                local_path = _remote_cache_path(ip, remote_path)
+                if (
+                    previous_signatures.get(remote_path) == signature
+                    and local_path.exists()
+                ):
+                    results.append((local_path, signature, remote_path, True))
+                    continue
 
-            temporary_path = local_path.with_suffix(".downloading")
-            sftp.get(remote_path, str(temporary_path))
-            os.replace(temporary_path, local_path)
-            return local_path, signature, remote_path, False
+                temporary_path = local_path.with_suffix(".downloading")
+                sftp.get(remote_path, str(temporary_path))
+                os.replace(temporary_path, local_path)
+                results.append((local_path, signature, remote_path, False))
+            return results
         finally:
             sftp.close()
     finally:
@@ -333,10 +383,16 @@ class MeterHistoryStore:
         )
         self._connection.commit()
 
-    def import_csv(self, csv_path: Path) -> int:
-        """Persist every numeric meter value in the CSV, ignoring duplicates."""
+    def import_csv(self, csv_path: Path, source: Optional[str] = None) -> int:
+        """Persist every numeric meter value in the CSV, ignoring duplicates.
+
+        ``source`` lets several physical CSVs (e.g. Robot's separate
+        full-dump and 4-second-partial meter streams) share one logical
+        history source, so their samples merge into a single series instead
+        of being tracked as unrelated sources.
+        """
         csv_path = Path(csv_path)
-        source = str(csv_path.resolve())
+        source = source if source is not None else str(csv_path.resolve())
         fallback_time = csv_path.stat().st_mtime
         inserts = []
 
@@ -456,6 +512,27 @@ class MeterHistoryStore:
             series[meter].append((sampled_at, value))
         return series
 
+    def latest_before(
+        self, source_path: Path, meter: str, timestamp: float
+    ) -> Optional[Tuple[float, float]]:
+        """Return the most recent (sampled_at, value) at or before ``timestamp``.
+
+        Used to carry a meter's last known value across a gap in its own
+        reporting (e.g. Robot logging state-change dumps at a slower cadence
+        than the game-counter stream, or the machine being powered off) so
+        its chart line reads as continuous instead of starting empty or
+        dangling mid-canvas.
+        """
+        row = self._connection.execute(
+            """
+            SELECT sampled_at, value FROM meter_samples
+            WHERE source = ? AND meter = ? AND sampled_at <= ?
+            ORDER BY sampled_at DESC LIMIT 1
+            """,
+            (str(Path(source_path).resolve()), meter, timestamp),
+        ).fetchone()
+        return (row[0], row[1]) if row else None
+
     def time_bounds(self, source_path: Path) -> Tuple[Optional[float], Optional[float]]:
         row = self._connection.execute(
             """
@@ -497,9 +574,8 @@ class MemoryProfilingTab(ctk.CTkFrame):
         self._running = False
         self._remote_fetch_active = False
         self._remote_request_id = 0
-        self._last_remote_signature: Optional[Tuple[int, int]] = None
-        self._active_remote_cache: Optional[Path] = None
-        self._resolved_remote_path = ""
+        self._last_remote_signatures: Dict[str, Tuple[int, int]] = {}
+        self._remote_source_key: Optional[Path] = None
         self._tcp_server: Optional[LiveMeterServer] = None
         self._tcp_events = None
         self._tcp_job = None
@@ -829,11 +905,10 @@ class MemoryProfilingTab(ctk.CTkFrame):
             self._local_fields.grid(row=0, column=2, columnspan=5, sticky="ew")
             self._source_hint.show("")
         self._last_file_signature = None
-        self._last_remote_signature = None
+        self._last_remote_signatures = {}
         self._remote_request_id += 1
         self._remote_fetch_active = False
-        self._active_remote_cache = None
-        self._resolved_remote_path = ""
+        self._remote_source_key = None
         self._active_tcp_source = None
         if hasattr(self, "_chart"):
             self._go_live()
@@ -843,7 +918,7 @@ class MemoryProfilingTab(ctk.CTkFrame):
     def _active_source_path(self) -> Optional[Path]:
         mode = self._source_mode_var.get()
         if mode == "Remote EGM":
-            return self._active_remote_cache
+            return self._remote_source_key
         if mode == "Live TCP":
             return self._active_tcp_source
         value = self._csv_path_var.get().strip()
@@ -1009,18 +1084,18 @@ class MemoryProfilingTab(ctk.CTkFrame):
         self._remote_fetch_active = True
         self._remote_request_id += 1
         request_id = self._remote_request_id
-        previous_signature = self._last_remote_signature
+        previous_signatures = dict(self._last_remote_signatures)
         self._status_var.set(f"Connecting to EGM {ip}…")
 
         def worker():
             try:
-                result = download_remote_meter_csv(
-                    ip, remote_path, previous_signature,
+                results = download_remote_meter_csv(
+                    ip, remote_path, previous_signatures,
                 )
                 self.after(
                     0,
                     lambda: self._remote_downloaded(
-                        request_id, ip, remote_path, result,
+                        request_id, ip, remote_path, results,
                     ),
                 )
             except Exception as exc:
@@ -1042,7 +1117,7 @@ class MemoryProfilingTab(ctk.CTkFrame):
         request_id: int,
         ip: str,
         requested_path: str,
-        result: Tuple[Path, Tuple[int, int], str, bool],
+        results: List[Tuple[Path, Tuple[int, int], str, bool]],
     ):
         if self._closed:
             return
@@ -1055,24 +1130,53 @@ class MemoryProfilingTab(ctk.CTkFrame):
         ):
             self._remote_fetch_active = False
             return
-        local_path, signature, resolved_path, unchanged = result
         self._remote_fetch_active = False
-        source_changed = local_path != self._active_remote_cache
-        self._active_remote_cache = local_path
-        self._resolved_remote_path = resolved_path
-        self._last_remote_signature = signature
-        if source_changed:
-            self._last_file_signature = None
 
-        if unchanged:
+        if self._remote_source_key is None:
+            self._remote_source_key = _remote_cache_path(ip, requested_path)
+        source_key = str(self._remote_source_key)
+
+        imported = 0
+        updated_names = []
+        value_dicts = []
+        for local_path, signature, resolved_path, unchanged in results:
+            self._last_remote_signatures[resolved_path] = signature
+            value_dicts.append(read_all_meters(local_path))
+            if not unchanged:
+                imported += self._history.import_csv(local_path, source=source_key)
+                updated_names.append(Path(resolved_path).name)
+
+        # Merge every stream's latest values: a real (non-None) value always
+        # wins, and later files (the faster/game-counter stream) take
+        # priority over earlier ones for meters both streams report, so the
+        # legend reflects the freshest sample for each meter.
+        self._current_values = self._merge_meter_values(*value_dicts)
+        self._update_value_labels()
+
+        if updated_names:
             self._status_var.set(
-                f"EGM {ip} • waiting for {Path(resolved_path).name} update • "
-                f"{datetime.now():%H:%M:%S}"
+                f"EGM {ip} • {', '.join(updated_names)} • {datetime.now():%H:%M:%S} • "
+                f"{imported} new values saved"
             )
+            self._update_timeline()
+            if self._live_view:
+                self._draw_chart()
         else:
-            self._process_csv(local_path, f"EGM {ip}")
-        self._update_timeline()
+            self._status_var.set(
+                f"EGM {ip} • waiting for update • {datetime.now():%H:%M:%S}"
+            )
         self._schedule_next_poll()
+
+    @staticmethod
+    def _merge_meter_values(*value_dicts: Dict[str, object]) -> Dict[str, object]:
+        merged: Dict[str, object] = {}
+        for values in value_dicts:
+            for meter, value in values.items():
+                if value is not None:
+                    merged[meter] = value
+                else:
+                    merged.setdefault(meter, None)
+        return merged
 
     def _remote_failed(
         self,
@@ -1112,7 +1216,7 @@ class MemoryProfilingTab(ctk.CTkFrame):
             self._draw_chart()
             return
         self._last_file_signature = None
-        self._last_remote_signature = None
+        self._last_remote_signatures = {}
         self._poll_once()
         self._draw_chart()
 
@@ -1121,7 +1225,7 @@ class MemoryProfilingTab(ctk.CTkFrame):
     def _update_value_labels(self):
         for meter, label in self._value_labels.items():
             value = self._current_values.get(meter)
-            label.configure(text=self._format_value(value) if value is not None else "—")
+            label.configure(text=self._format_value(meter, value) if value is not None else "—")
 
     def _selected_meters(self) -> List[str]:
         return [meter for meter in ALL_METERS if self._meter_vars[meter].get()]
@@ -1268,6 +1372,19 @@ class MemoryProfilingTab(ctk.CTkFrame):
             end_time = start_time + 1
         selected = self._selected_meters()
         series = self._history.load_series(path, start_time, end_time, selected)
+        for meter in selected:
+            meter_points = series[meter]
+            if not meter_points or meter_points[0][0] > start_time:
+                # This meter has no sample right at the window's left edge —
+                # either it hasn't reported since before the window (Robot
+                # logs some meters only on state changes, so a quiet stretch
+                # or the machine being off leaves a real gap) or it has no
+                # history at all yet. Carry its last known value in from
+                # whatever came before so the line starts continuous instead
+                # of empty or appearing to begin mid-canvas.
+                anchor = self._history.latest_before(path, meter, start_time)
+                if anchor is not None:
+                    meter_points.insert(0, (start_time, anchor[1]))
         points = [point for meter_points in series.values() for point in meter_points]
 
         max_value = max((value for _, value in points), default=0.0)
@@ -1318,6 +1435,13 @@ class MemoryProfilingTab(ctk.CTkFrame):
                 transformed = math.log10(max(0.0, value) + 1)
                 y = bottom - (transformed / max_log) * (bottom - top)
                 coords.extend((x, y))
+            if coords and coords[-2] < right - 0.5:
+                # Hold the last known value flat out to the visible edge.
+                # Without this, a meter that stopped reporting (state-change
+                # events paused, or Robot itself powered off) dangles at
+                # whatever x its last sample landed on instead of reading as
+                # a continuous line up to "now".
+                coords.extend((right, coords[-1]))
             if len(coords) >= 4:
                 canvas.create_line(
                     *coords, fill=colour, width=line_width,
@@ -1354,10 +1478,14 @@ class MemoryProfilingTab(ctk.CTkFrame):
         return f"{value:.0f}"
 
     @staticmethod
-    def _format_value(value) -> str:
-        if isinstance(value, float) and not value.is_integer():
-            return f"{value:,.3f}"
-        if isinstance(value, (int, float)):
+    def _format_value(meter: str, value) -> str:
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            if meter in _BYTES_TO_MB_METERS:
+                return f"{value / (1024 * 1024):,.1f} MB"
+            if meter in _KB_TO_MB_METERS:
+                return f"{value / 1024:,.1f} MB"
+            if isinstance(value, float) and not value.is_integer():
+                return f"{value:,.3f}"
             return f"{int(value):,}"
         return str(value)
 
